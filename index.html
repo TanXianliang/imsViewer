@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>imsViewer</title>
+  <link rel="stylesheet" href="/src/styles.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- 菜单栏 -->
+    <div id="menu-bar">
+      <div class="menu-item" data-menu="file">
+        文件
+        <div class="menu-dropdown">
+          <div class="menu-action" data-action="open">打开文件... <span>Ctrl+O</span></div>
+          <div class="menu-separator"></div>
+          <div class="menu-action" data-action="export-current">导出当前图片... <span>Ctrl+E</span></div>
+          <div class="menu-action" data-action="export-all">导出全部子图... <span>Ctrl+Shift+E</span></div>
+        </div>
+      </div>
+      <div class="menu-item" data-menu="view">
+        视图
+        <div class="menu-dropdown">
+          <div class="menu-action" data-action="fit">适应窗口 <span>0</span></div>
+          <div class="menu-action" data-action="original">原始大小 <span>1</span></div>
+          <div class="menu-separator"></div>
+          <div class="menu-action" data-action="zoom-in">放大 <span>+</span></div>
+          <div class="menu-action" data-action="zoom-out">缩小 <span>-</span></div>
+        </div>
+      </div>
+      <div class="menu-item" data-menu="help">
+        帮助
+        <div class="menu-dropdown">
+          <div class="menu-action" data-action="about">关于 imsViewer</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 三栏主体 -->
+    <div id="main-container">
+      <!-- 左栏：缩略图 -->
+      <div id="left-panel">
+        <div id="folder-bar">
+          <button id="btn-prev-file" title="上一个文件 (←)">◀</button>
+          <span id="folder-position">--</span>
+          <button id="btn-next-file" title="下一个文件 (→)">▶</button>
+        </div>
+        <div id="thumbnail-header">子图列表</div>
+        <div id="thumbnail-list"></div>
+      </div>
+
+      <!-- 中栏：图片显示 -->
+      <div id="center-panel">
+        <canvas id="image-canvas"></canvas>
+        <div id="drop-hint">拖放图片文件到此处打开</div>
+      </div>
+
+      <!-- 右栏：信息面板 -->
+      <div id="right-panel">
+        <div class="info-group">
+          <div class="info-group-title">当前文件</div>
+          <table class="info-table">
+            <tr><td>文件名</td><td id="info-file-name">--</td></tr>
+            <tr><td>文件类型</td><td id="info-file-type">--</td></tr>
+            <tr><td>文件大小</td><td id="info-file-size">--</td></tr>
+            <tr id="row-ims-version"><td>IMS 版本</td><td id="info-ims-version">--</td></tr>
+            <tr id="row-image-count"><td>图片总数</td><td id="info-image-count">--</td></tr>
+            <tr id="row-cover-file"><td>封面文件</td><td id="info-cover-file">--</td></tr>
+          </table>
+        </div>
+        <div class="info-group">
+          <div class="info-group-title">当前图片</div>
+          <table class="info-table">
+            <tr><td>文件名</td><td id="info-image-name">--</td></tr>
+            <tr><td>格式</td><td id="info-image-format">--</td></tr>
+            <tr><td>分辨率</td><td id="info-image-resolution">--</td></tr>
+            <tr><td>数据大小</td><td id="info-image-size">--</td></tr>
+            <tr id="row-image-offset"><td>偏移</td><td id="info-image-offset">--</td></tr>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- 状态栏 -->
+    <div id="status-bar">
+      <span id="status-file-pos">未打开文件</span>
+      <span class="status-sep">|</span>
+      <span id="status-sub-pos">--</span>
+      <span class="status-sep">|</span>
+      <span id="status-zoom">100%</span>
+    </div>
+  </div>
+
+  <script type="module" src="/src/app.js"></script>
+</body>
+</html>

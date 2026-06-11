@@ -1,0 +1,563 @@
+// ============================================================
+// imsViewer — 前端主逻辑
+// Tauri v2 + Canvas + 三栏布局
+// ============================================================
+
+import { invoke } from '@tauri-apps/api/core';
+import { getCurrentWindow } from '@tauri-apps/api/window';
+
+// ===== State =====
+const state = {
+  folderList: [],          // FolderEntry[]
+  currentFileIdx: -1,
+  imsInfo: null,           // ImsFileInfo | null
+  subImages: [],           // SubImagePayload[]
+  currentSubIdx: 0,
+  scale: 1.0,
+  offsetX: 0,
+  offsetY: 0,
+  imgObj: null,
+  isFitMode: true,          // 适应窗口模式
+};
+
+// ===== DOM 引用 =====
+const $ = (sel) => document.querySelector(sel);
+const $$ = (sel) => document.querySelectorAll(sel);
+
+const dom = {
+  canvas: $('#image-canvas'),
+  ctx: null,
+  thumbnailList: $('#thumbnail-list'),
+  thumbnailHeader: $('#thumbnail-header'),
+  folderPosition: $('#folder-position'),
+  dropHint: $('#drop-hint'),
+  infoFileName: $('#info-file-name'),
+  infoFileType: $('#info-file-type'),
+  infoFileSize: $('#info-file-size'),
+  infoImsVersion: $('#info-ims-version'),
+  infoImageCount: $('#info-image-count'),
+  infoCoverFile: $('#info-cover-file'),
+  infoImageName: $('#info-image-name'),
+  infoImageFormat: $('#info-image-format'),
+  infoImageResolution: $('#info-image-resolution'),
+  infoImageSize: $('#info-image-size'),
+  infoImageOffset: $('#info-image-offset'),
+  statusFilePos: $('#status-file-pos'),
+  statusSubPos: $('#status-sub-pos'),
+  statusZoom: $('#status-zoom'),
+};
+
+// ===== 初始化 =====
+function init() {
+  dom.ctx = dom.canvas.getContext('2d');
+  setupCanvasSize();
+  setupKeyboard();
+  setupMouse();
+  setupNativeDrop();    // Tauri 原生拖放
+  setupMenuActions();
+  setupFolderBar();
+  window.addEventListener('resize', () => {
+    setupCanvasSize();
+    if (state.isFitMode && state.imgObj) {
+      fitToWindow();
+    }
+    drawImage();
+  });
+  console.log('imsViewer 前端初始化完成');
+}
+
+// ===== Canvas 尺寸适配 =====
+function setupCanvasSize() {
+  const rect = $('#center-panel').getBoundingClientRect();
+  dom.canvas.width = rect.width;
+  dom.canvas.height = rect.height;
+}
+
+// ===== base64 转 Uint8Array =====
+function base64ToBytes(b64) {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+// ===== 图片显示 =====
+function loadCurrentImage() {
+  if (!state.subImages.length || state.currentSubIdx >= state.subImages.length) return;
+  const sub = state.subImages[state.currentSubIdx];
+  console.log('加载图片:', sub.filename, 'index:', state.currentSubIdx);
+
+  const mime = sub.format === 0 ? 'image/jpeg' : 'image/png';
+  const rawBytes = base64ToBytes(sub.bytes_base64);
+  const blob = new Blob([rawBytes], { type: mime });
+  const url = URL.createObjectURL(blob);
+
+  if (state.imgObj && state.imgObj._url) URL.revokeObjectURL(state.imgObj._url);
+
+  const img = new Image();
+  img._url = url;
+  img.onload = () => {
+    state.imgObj = img;
+    fitToWindow();
+    drawImage();
+    updateCurrentImageInfo(sub);
+    updateStatusBar();
+  };
+  img.onerror = (err) => {
+    console.error('图片加载失败:', err);
+  };
+  img.src = url;
+}
+
+function fitToWindow() {
+  if (!state.imgObj) return;
+  const cw = dom.canvas.width;
+  const ch = dom.canvas.height;
+  const sx = cw / state.imgObj.width;
+  const sy = ch / state.imgObj.height;
+  state.scale = Math.min(sx, sy);
+  state.offsetX = (cw - state.imgObj.width * state.scale) / 2;
+  state.offsetY = (ch - state.imgObj.height * state.scale) / 2;
+  state.isFitMode = true;
+  updateZoomLabel();
+}
+
+function centerOriginal() {
+  if (!state.imgObj) return;
+  state.scale = 1.0;
+  state.offsetX = (dom.canvas.width - state.imgObj.width) / 2;
+  state.offsetY = (dom.canvas.height - state.imgObj.height) / 2;
+  state.isFitMode = false;
+  updateZoomLabel();
+}
+
+function drawImage() {
+  if (!state.imgObj) return;
+  const ctx = dom.ctx;
+  ctx.clearRect(0, 0, dom.canvas.width, dom.canvas.height);
+  ctx.save();
+  ctx.translate(state.offsetX, state.offsetY);
+  ctx.scale(state.scale, state.scale);
+  ctx.drawImage(state.imgObj, 0, 0);
+  ctx.restore();
+}
+
+function zoomAt(factor, cx, cy) {
+  const oldScale = state.scale;
+  state.scale = Math.max(0.05, Math.min(20, state.scale * factor));
+  state.offsetX = cx - (cx - state.offsetX) * (state.scale / oldScale);
+  state.offsetY = cy - (cy - state.offsetY) * (state.scale / oldScale);
+  state.isFitMode = false;
+  updateZoomLabel();
+  drawImage();
+}
+
+function updateZoomLabel() {
+  dom.statusZoom.textContent = Math.round(state.scale * 100) + '%';
+}
+
+// ===== 缩略图 =====
+function buildThumbnails() {
+  dom.thumbnailList.innerHTML = '';
+  const isIms = state.imsInfo !== null;
+
+  if (isIms) {
+    dom.thumbnailHeader.textContent = `子图列表 (${state.subImages.length})`;
+    state.subImages.forEach((sub, i) => {
+      dom.thumbnailList.appendChild(createThumbItem(sub, i));
+    });
+  } else {
+    dom.thumbnailHeader.textContent = '单张图片';
+    if (state.subImages.length > 0) {
+      dom.thumbnailList.appendChild(createThumbItem(state.subImages[0], 0));
+    }
+  }
+  highlightThumbnail(state.currentSubIdx);
+}
+
+function createThumbItem(sub, index) {
+  const mime = sub.format === 0 ? 'image/jpeg' : 'image/png';
+  const rawBytes = base64ToBytes(sub.bytes_base64);
+  const blob = new Blob([rawBytes], { type: mime });
+  const url = URL.createObjectURL(blob);
+
+  const div = document.createElement('div');
+  div.className = 'thumb-item';
+  div.dataset.index = index;
+  div.innerHTML = `
+    <img src="${url}" alt="${sub.filename}" />
+    <span class="thumb-label">${sub.filename}</span>
+    ${sub.isCover ? '<span class="cover-badge">⭐</span>' : ''}
+  `;
+  div.addEventListener('click', () => selectSubImage(index));
+  return div;
+}
+
+function highlightThumbnail(index) {
+  $$('.thumb-item').forEach((el, i) => {
+    el.classList.toggle('active', i === index);
+  });
+  const active = dom.thumbnailList.querySelector('.thumb-item.active');
+  if (active) active.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+
+function selectSubImage(index) {
+  if (index < 0 || index >= state.subImages.length) return;
+  state.currentSubIdx = index;
+  loadCurrentImage();
+  highlightThumbnail(index);
+  updateCurrentImageInfo(state.subImages[index]);
+}
+
+// ===== 文件导航 =====
+async function openFile(filepath) {
+  console.log('openFile 被调用, path:', filepath);
+  try {
+    const payload = await invoke('open_file', { path: filepath });
+    console.log('open_file 返回 payload:', payload);
+
+    state.folderList = payload.folder_list;
+    state.currentFileIdx = payload.file_index;
+    state.imsInfo = payload.ims_info;
+    state.subImages = payload.sub_images;
+    state.currentSubIdx = 0;
+
+    buildThumbnails();
+    loadCurrentImage();
+    updateFileInfo(payload);
+    updateFolderBar();
+    updateStatusBar();
+
+    const fname = state.folderList[state.currentFileIdx]?.filename ?? filepath;
+    document.title = `imsViewer - ${fname}`;
+    dom.dropHint.classList.remove('visible');
+  } catch (err) {
+    console.error('打开文件失败:', err);
+    alert('打开文件失败: ' + err);
+  }
+}
+
+async function navigateFile(delta) {
+  if (state.folderList.length === 0) return;
+  const newIdx = state.currentFileIdx + delta;
+  if (newIdx < 0 || newIdx >= state.folderList.length) return;
+  await openFile(state.folderList[newIdx].filepath);
+}
+
+async function navigateSub(delta) {
+  if (!state.imsInfo) return;
+  const newIdx = state.currentSubIdx + delta;
+  if (newIdx < 0 || newIdx >= state.subImages.length) return;
+  selectSubImage(newIdx);
+}
+
+// ===== 文件夹导航条 =====
+function setupFolderBar() {
+  $('#btn-prev-file').addEventListener('click', () => navigateFile(-1));
+  $('#btn-next-file').addEventListener('click', () => navigateFile(1));
+}
+
+function updateFolderBar() {
+  if (state.folderList.length === 0) {
+    dom.folderPosition.textContent = '--';
+    return;
+  }
+  dom.folderPosition.textContent = `${state.currentFileIdx + 1} / ${state.folderList.length}`;
+}
+
+// ===== 信息面板 =====
+function updateFileInfo(payload) {
+  dom.infoFileName.textContent = payload.filename ?? '--';
+  dom.infoFileType.textContent = payload.is_ims ? 'IMS 容器' : payload.file_type ?? '--';
+  dom.infoFileSize.textContent = formatSize(payload.file_size ?? 0);
+
+  const isIms = payload.ims_info !== null;
+  toggleImsRows(isIms);
+
+  if (isIms) {
+    const info = payload.ims_info;
+    dom.infoImsVersion.textContent = 'v' + info.version;
+    dom.infoImageCount.textContent = info.image_count;
+    dom.infoCoverFile.textContent = info.images.find(i => i.is_cover)?.filename ?? '--';
+  }
+}
+
+function updateCurrentImageInfo(sub) {
+  if (!sub) {
+    dom.infoImageName.textContent = '--';
+    dom.infoImageFormat.textContent = '--';
+    dom.infoImageResolution.textContent = '--';
+    dom.infoImageSize.textContent = '--';
+    dom.infoImageOffset.textContent = '--';
+    return;
+  }
+  dom.infoImageName.textContent = sub.filename ?? '--';
+  dom.infoImageFormat.textContent = sub.format === 0 ? 'JPEG' : 'PNG';
+  dom.infoImageSize.textContent = formatSize(sub.data_length ?? 0);
+
+  if (state.imgObj && state.currentSubIdx === (sub.index ?? 0)) {
+    dom.infoImageResolution.textContent = `${state.imgObj.width} × ${state.imgObj.height}`;
+  } else {
+    dom.infoImageResolution.textContent = '--';
+  }
+  dom.infoImageOffset.textContent = sub.data_offset !== undefined ? String(sub.data_offset) : '--';
+}
+
+function toggleImsRows(visible) {
+  const rows = ['#row-ims-version', '#row-image-count', '#row-cover-file', '#row-image-offset'];
+  rows.forEach(sel => {
+    const el = $(sel);
+    if (el) el.style.display = visible ? '' : 'none';
+  });
+}
+
+function updateStatusBar() {
+  if (state.folderList.length === 0) {
+    dom.statusFilePos.textContent = '未打开文件';
+    dom.statusSubPos.textContent = '--';
+    return;
+  }
+  const fname = state.folderList[state.currentFileIdx]?.filename ?? '--';
+  dom.statusFilePos.textContent = `文件 ${state.currentFileIdx + 1}/${state.folderList.length}: ${fname}`;
+
+  if (state.imsInfo) {
+    dom.statusSubPos.textContent = `子图 ${state.currentSubIdx + 1}/${state.subImages.length}`;
+  } else {
+    dom.statusSubPos.textContent = '单张';
+  }
+}
+
+// ===== 键盘事件 =====
+function setupKeyboard() {
+  document.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+    switch (e.key) {
+      case 'ArrowLeft':  e.preventDefault(); navigateFile(-1); break;
+      case 'ArrowRight': e.preventDefault(); navigateFile(1);  break;
+      case 'ArrowUp':    e.preventDefault(); navigateSub(-1);  break;
+      case 'ArrowDown':  e.preventDefault(); navigateSub(1);   break;
+      case 'Home':       e.preventDefault(); navigateFile(-state.currentFileIdx); break;
+      case 'End':        e.preventDefault(); navigateFile(state.folderList.length - 1 - state.currentFileIdx); break;
+      case '0':          e.preventDefault(); fitToWindow(); drawImage(); break;
+      case '1':          e.preventDefault(); centerOriginal(); drawImage(); break;
+      case '+':
+      case '=':          e.preventDefault(); zoomAt(1.25, dom.canvas.width / 2, dom.canvas.height / 2); break;
+      case '-':          e.preventDefault(); zoomAt(0.8, dom.canvas.width / 2, dom.canvas.height / 2); break;
+      case 'o':
+        if (e.ctrlKey) {
+          e.preventDefault();
+          pickAndOpenFile();
+        }
+        break;
+      case 'e':
+        if (e.ctrlKey && e.shiftKey) {
+          e.preventDefault();
+          exportAll();
+        } else if (e.ctrlKey) {
+          e.preventDefault();
+          exportCurrent();
+        }
+        break;
+    }
+  });
+}
+
+// ===== 鼠标事件 =====
+function setupMouse() {
+  let isPanning = false;
+  let panStartX = 0, panStartY = 0;
+  let panOrigOffsetX = 0, panOrigOffsetY = 0;
+
+  dom.canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    if (e.ctrlKey || e.metaKey) {
+      // Ctrl+滚轮：以鼠标位置为中心缩放
+      const rect = dom.canvas.getBoundingClientRect();
+      const factor = e.deltaY < 0 ? 1.15 : 0.87;
+      zoomAt(factor, e.clientX - rect.left, e.clientY - rect.top);
+    } else if (e.shiftKey) {
+      // Shift+滚轮：切换子图
+      navigateSub(e.deltaY > 0 ? 1 : -1);
+    } else {
+      // 直接滚轮：切换文件
+      navigateFile(e.deltaY > 0 ? 1 : -1);
+    }
+  });
+
+  dom.canvas.addEventListener('mousedown', (e) => {
+    if (e.button === 0) {
+      isPanning = true;
+      panStartX = e.clientX;
+      panStartY = e.clientY;
+      panOrigOffsetX = state.offsetX;
+      panOrigOffsetY = state.offsetY;
+    }
+  });
+
+  window.addEventListener('mousemove', (e) => {
+    if (!isPanning) return;
+    state.offsetX = panOrigOffsetX + (e.clientX - panStartX);
+    state.offsetY = panOrigOffsetY + (e.clientY - panStartY);
+    state.isFitMode = false;
+    drawImage();
+  });
+
+  window.addEventListener('mouseup', () => { isPanning = false; });
+
+  dom.canvas.addEventListener('dblclick', () => {
+    if (state.scale < 0.99) {
+      fitToWindow(); // 内部设置 isFitMode = true
+    } else {
+      centerOriginal();
+    }
+    drawImage();
+    updateZoomLabel();
+  });
+}
+
+// ===== Tauri 原生拖放（代替 HTML5 DataTransfer） =====
+async function setupNativeDrop() {
+  try {
+    const appWindow = getCurrentWindow();
+    console.log('注册 Tauri 原生拖放监听...');
+
+    await appWindow.onDragDropEvent((event) => {
+      console.log('拖放事件:', event.payload.type);
+      const { type, paths } = event.payload;
+
+      if (type === 'over') {
+        dom.dropHint.classList.add('visible');
+      } else if (type === 'leave') {
+        dom.dropHint.classList.remove('visible');
+      } else if (type === 'drop') {
+        dom.dropHint.classList.remove('visible');
+        if (paths && paths.length > 0) {
+          const filepath = paths[0];
+          console.log('拖放文件:', filepath);
+          openFile(filepath);
+        }
+      }
+    });
+    console.log('拖放监听注册成功');
+  } catch (err) {
+    console.error('拖放监听注册失败:', err);
+    // 回退到 HTML5 拖放
+    setupHtml5Drop();
+  }
+}
+
+// HTML5 拖放回退方案
+function setupHtml5Drop() {
+  console.log('使用 HTML5 拖放回退方案');
+  const panel = $('#center-panel');
+  panel.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dom.dropHint.classList.add('visible');
+  });
+  panel.addEventListener('dragleave', () => {
+    dom.dropHint.classList.remove('visible');
+  });
+  panel.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dom.dropHint.classList.remove('visible');
+
+    // 尝试从 dataTransfer 获取文件路径
+    const files = e.dataTransfer?.files;
+    if (files && files.length > 0) {
+      const path = files[0].path || files[0].name;
+      console.log('HTML5 拖放文件:', path);
+      if (path) await openFile(path);
+    }
+  });
+}
+
+// ===== 菜单栏 =====
+function setupMenuActions() {
+  $$('.menu-action').forEach(el => {
+    el.addEventListener('click', async () => {
+      const action = el.dataset.action;
+      console.log('菜单操作:', action);
+      switch (action) {
+        case 'open':
+          await pickAndOpenFile();
+          break;
+        case 'export-current':
+          exportCurrent();
+          break;
+        case 'export-all':
+          exportAll();
+          break;
+        case 'fit':
+          fitToWindow();
+          drawImage();
+          break;
+        case 'original':
+          centerOriginal();
+          drawImage();
+          break;
+        case 'zoom-in':
+          zoomAt(1.25, dom.canvas.width / 2, dom.canvas.height / 2);
+          break;
+        case 'zoom-out':
+          zoomAt(0.8, dom.canvas.width / 2, dom.canvas.height / 2);
+          break;
+        case 'about':
+          alert('imsViewer v1.0\nIMS 图片浏览器\n基于 Tauri v2 + Rust + Canvas');
+          break;
+      }
+    });
+  });
+}
+
+async function pickAndOpenFile() {
+  try {
+    console.log('调用 pick_file...');
+    const path = await invoke('pick_file');
+    console.log('pick_file 返回:', path);
+    if (path) await openFile(path);
+  } catch (e) {
+    console.error('pick_file 失败:', e);
+  }
+}
+
+// ===== 导出 =====
+async function exportCurrent() {
+  if (state.folderList.length === 0) return;
+  const entry = state.folderList[state.currentFileIdx];
+  try {
+    const outPath = await invoke('extract_image', {
+      path: entry.filepath,
+      index: state.currentSubIdx,
+    });
+    alert('已导出: ' + outPath);
+  } catch (err) {
+    alert('导出失败: ' + err);
+  }
+}
+
+async function exportAll() {
+  if (state.folderList.length === 0 || !state.imsInfo) return;
+  const entry = state.folderList[state.currentFileIdx];
+  try {
+    const paths = await invoke('extract_all', { path: entry.filepath });
+    alert(`已导出 ${paths.length} 张图片`);
+  } catch (err) {
+    alert('导出失败: ' + err);
+  }
+}
+
+// ===== 工具函数 =====
+function formatSize(bytes) {
+  if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + ' MB';
+  if (bytes >= 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return bytes + ' bytes';
+}
+
+// ===== 启动 =====
+console.log('Tauri API:', typeof invoke);
+init();
