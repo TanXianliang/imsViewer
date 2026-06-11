@@ -31,8 +31,9 @@ for i in range(image_count):
     pos += 2
     name = data[pos:pos + name_len].decode("utf-8")
     pos += name_len
-    fmt, data_off, data_len, is_cover = struct.unpack_from("<B I I ?", data, pos)
+    fmt, data_off, data_len, is_cover_byte = struct.unpack_from("<B I I B", data, pos)
     pos += 1 + 4 + 4 + 1
+    is_cover = bool(is_cover_byte)
     fmt_name = "JPEG" if fmt == 0 else "PNG"
     cover_tag = " [封面]" if is_cover else ""
     # 验证提取的数据
