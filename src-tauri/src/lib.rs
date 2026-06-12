@@ -277,6 +277,49 @@ async fn extract_all(app: tauri::AppHandle, path: String) -> Result<Vec<String>,
     Ok(saved_paths)
 }
 
+/// 注册 imsViewer 到右键菜单"使用 imsViewer 打开"
+#[tauri::command]
+fn register_file_associations() -> Result<String, String> {
+    let exe_path = std::env::current_exe()
+        .map_err(|e| format!("获取 exe 路径失败: {}", e))?;
+    let exe_str = exe_path.to_string_lossy().to_string();
+    let exe_cmd = format!("\"{}\" \"%1\"", exe_str);
+    let ico = format!("\"{}\",0", exe_str);
+
+    let ext_groups: &[(&str, &[&str])] = &[
+        ("image", &["jpg", "jpeg", "png", "webp", "avif"]),
+        ("imscontainer", &["ims.jpg", "ims.png"]),
+    ];
+
+    for (_group, exts) in ext_groups {
+        for ext in *exts {
+            // 为每个扩展名添加右键菜单项
+            let shell_path = format!(
+                "HKCU\\Software\\Classes\\SystemFileAssociations\\.{}\\shell\\OpenWithImsViewer",
+                ext
+            );
+            // 菜单显示名
+            let _ = std::process::Command::new("reg")
+                .args(["add", &shell_path, "/ve", "/d", "使用 imsViewer 打开", "/f"])
+                .output();
+            // 图标
+            let _ = std::process::Command::new("reg")
+                .args(["add", &shell_path, "/v", "Icon", "/d", &ico, "/f"])
+                .output();
+            // 命令
+            let cmd_path = format!("{}\\command", shell_path);
+            let _ = std::process::Command::new("reg")
+                .args(["add", &cmd_path, "/ve", "/d", &exe_cmd, "/f"])
+                .output();
+        }
+    }
+
+    // 刷新 shell
+    let _ = std::process::Command::new("ie4uinit").args(["-show"]).output();
+
+    Ok("已添加到右键菜单".into())
+}
+
 /// 批量升级：扫描 IMS 文件，升级到最新版本（v2 + SHA-256 hash）
 #[tauri::command]
 async fn start_batch_upgrade(
@@ -556,6 +599,7 @@ pub fn run() {
             extract_all,
             start_batch_convert,
             start_batch_upgrade,
+            register_file_associations,
         ])
         .run(tauri::generate_context!())
         .expect("启动 imsViewer 失败");

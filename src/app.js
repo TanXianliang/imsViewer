@@ -526,6 +526,9 @@ function setupMenuActions() {
         case 'batch-upgrade':
           openUpgradeModal();
           break;
+        case 'register-assoc':
+          registerAssociations();
+          break;
         case 'help-shortcuts':
           alert(
             '═══ 键盘快捷键 ═══\n\n' +
@@ -797,6 +800,15 @@ async function startBatchUpgrade() {
     alert('升级失败: ' + err);
     btn.disabled = false;
     btn.textContent = '开始升级';
+  }
+}
+
+async function registerAssociations() {
+  try {
+    const msg = await invoke('register_file_associations');
+    alert('✅ ' + msg + '\n\n支持的格式: JPG, JPEG, PNG, WebP, AVIF, IMS.JPG, IMS.PNG\n\n右键图片文件 → 打开方式 → imsViewer\n或使用安装包版本自动设置默认关联。');
+  } catch (err) {
+    alert('注册失败: ' + err + '\n\n请尝试以管理员身份运行 imsViewer 后重试。');
   }
 }
 

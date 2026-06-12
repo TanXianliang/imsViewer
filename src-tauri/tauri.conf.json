@@ -32,6 +32,18 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
+    ],
+    "fileAssociations": [
+      {
+        "ext": ["jpg", "jpeg", "png", "webp", "avif"],
+        "name": "Image",
+        "description": "图片文件"
+      },
+      {
+        "ext": ["ims.jpg", "ims.png"],
+        "name": "IMS Container",
+        "description": "IMS 容器文件"
+      }
     ]
   }
 }
