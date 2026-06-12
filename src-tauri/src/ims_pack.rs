@@ -283,6 +283,121 @@ pub fn scan_and_group(input_folder: &str, max_depth: u32) -> Result<Vec<ImageGro
     Ok(result)
 }
 
+// ---- IMS 版本升级 ----
+
+/// 将旧版 IMS 文件升级到 v2（添加 SHA-256 hash）
+pub fn upgrade_ims_file(filepath: &str) -> Result<(), String> {
+    use crate::ims::{parse_ims, read_sub_image};
+
+    let ims_info = parse_ims(filepath)?;
+
+    // 已经是 v2+，跳过
+    if ims_info.version >= 2 {
+        return Ok(());
+    }
+
+    // 读取所有子图数据
+    let mut entries: Vec<UpEntry> = Vec::new();
+    for img in &ims_info.images {
+        let bytes = read_sub_image(filepath, img.data_offset, img.data_length)?;
+        entries.push(UpEntry {
+            filename: img.filename.clone(),
+            format: img.format,
+            bytes,
+            is_cover: img.is_cover,
+        });
+    }
+
+    // 封面排第一
+    entries.sort_by_key(|e| !e.is_cover);
+
+    // 写入临时文件，然后替换
+    let tmp_path = format!("{}.tmp_upgrade", filepath);
+    write_ims_entries(&tmp_path, &entries)?;
+    std::fs::remove_file(filepath)
+        .map_err(|e| format!("删除旧文件失败: {}", e))?;
+    std::fs::rename(&tmp_path, filepath)
+        .map_err(|e| format!("替换文件失败: {}", e))?;
+
+    Ok(())
+}
+
+/// 扫描目录中所有 IMS 文件
+pub fn scan_ims_files(dir: &str, max_depth: u32) -> Vec<String> {
+    let mut walker = walkdir::WalkDir::new(dir);
+    if max_depth > 0 {
+        walker = walker.max_depth(max_depth as usize);
+    }
+    walker
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .filter(|e| {
+            if let Some(stem) = e.path().file_stem().and_then(|s| s.to_str()) {
+                stem.to_lowercase().contains(".ims")
+            } else {
+                false
+            }
+        })
+        .map(|e| e.path().to_string_lossy().to_string())
+        .collect()
+}
+
+/// 直接写入 IMS v2 文件（内部用，接受已读取的字节数据）
+fn write_ims_entries(output_path: &str, entries: &[UpEntry]) -> Result<(), String> {
+    let count = entries.len();
+    let mut offsets: Vec<u32> = Vec::with_capacity(count);
+    let mut cumulative: u32 = 0;
+    for e in entries {
+        offsets.push(cumulative);
+        cumulative += e.bytes.len() as u32;
+    }
+    let index_offset = cumulative;
+
+    if let Some(parent) = Path::new(output_path).parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+
+    let mut out = std::fs::File::create(output_path)
+        .map_err(|e| format!("创建文件失败: {}", e))?;
+
+    for e in entries {
+        out.write_all(&e.bytes).map_err(|e| format!("写入数据失败: {}", e))?;
+    }
+
+    out.write_all(MAGIC).map_err(|e| format!("写入 magic 失败: {}", e))?;
+    out.write_u16::<LittleEndian>(VERSION).map_err(|e| format!("写入 version 失败: {}", e))?;
+    out.write_u32::<LittleEndian>(count as u32).map_err(|e| format!("写入 count 失败: {}", e))?;
+    out.write_u32::<LittleEndian>(0).map_err(|e| format!("写入 data_start 失败: {}", e))?;
+
+    for (i, e) in entries.iter().enumerate() {
+        let name_bytes = e.filename.as_bytes();
+        out.write_u16::<LittleEndian>(name_bytes.len() as u16).map_err(|e| format!("写入 name_len 失败: {}", e))?;
+        out.write_all(name_bytes).map_err(|e| format!("写入 name 失败: {}", e))?;
+        out.write_u8(e.format).map_err(|e| format!("写入 format 失败: {}", e))?;
+        out.write_u32::<LittleEndian>(offsets[i]).map_err(|e| format!("写入 offset 失败: {}", e))?;
+        out.write_u32::<LittleEndian>(e.bytes.len() as u32).map_err(|e| format!("写入 length 失败: {}", e))?;
+        out.write_u8(if e.is_cover { 1 } else { 0 }).map_err(|e| format!("写入 is_cover 失败: {}", e))?;
+
+        let mut hasher = Sha256::new();
+        hasher.update(&e.bytes);
+        let hash = hasher.finalize();
+        out.write_u8(HASH_ALGO_SHA256).map_err(|e| format!("写入 hash_algo 失败: {}", e))?;
+        out.write_all(&hash).map_err(|e| format!("写入 hash 失败: {}", e))?;
+    }
+
+    out.write_u32::<LittleEndian>(index_offset).map_err(|e| format!("写入 index_offset 失败: {}", e))?;
+
+    Ok(())
+}
+
+struct UpEntry {
+    filename: String,
+    format: u8,
+    bytes: Vec<u8>,
+    is_cover: bool,
+}
+
 /// 扫描多个文件夹，汇总所有 ImageGroup
 pub fn scan_multiple_folders(folders: &[FolderConfig]) -> Result<Vec<ImageGroup>, String> {
     let mut all_groups = Vec::new();

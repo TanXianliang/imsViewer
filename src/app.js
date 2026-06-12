@@ -523,6 +523,9 @@ function setupMenuActions() {
         case 'batch-convert':
           openBatchModal();
           break;
+        case 'batch-upgrade':
+          openUpgradeModal();
+          break;
         case 'help-shortcuts':
           alert(
             '═══ 键盘快捷键 ═══\n\n' +
@@ -735,6 +738,66 @@ function setupBatchEvents() {
 
 function escapeHtml(str) {
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// ===== 批量升级模态框 =====
+let upgradeUnlisten = null;
+
+function openUpgradeModal() {
+  const modal = $('#upgrade-modal');
+  modal.style.display = 'flex';
+  $('#upgrade-progress-fill').style.width = '0%';
+  $('#upgrade-progress-text').textContent = '准备就绪';
+  $('#btn-start-upgrade').disabled = false;
+
+  $('#btn-browse-upgrade').onclick = async () => {
+    try {
+      const dir = await invoke('pick_folder');
+      if (dir) $('#upgrade-dir-input').value = dir;
+    } catch (e) { console.error(e); }
+  };
+  $('#btn-upgrade-close').onclick = () => closeUpgradeModal();
+  $('#btn-cancel-upgrade').onclick = () => closeUpgradeModal();
+  $('#btn-start-upgrade').onclick = () => startBatchUpgrade();
+}
+
+function closeUpgradeModal() {
+  $('#upgrade-modal').style.display = 'none';
+  if (upgradeUnlisten) { upgradeUnlisten(); upgradeUnlisten = null; }
+}
+
+async function startBatchUpgrade() {
+  const path = $('#upgrade-dir-input').value.trim();
+  if (!path) { alert('请选择目录'); return; }
+  const depth = parseInt($('#upgrade-depth-input').value) || 0;
+  const multi = $('#chk-upgrade-multi').checked;
+
+  const btn = $('#btn-start-upgrade');
+  btn.disabled = true;
+  btn.textContent = '升级中...';
+  $('#upgrade-progress-text').textContent = '正在扫描 IMS 文件...';
+
+  try {
+    if (upgradeUnlisten) upgradeUnlisten();
+    upgradeUnlisten = await listen('batch-progress', (event) => {
+      const p = event.payload;
+      const pct = p.total > 0 ? Math.round((p.current / p.total) * 100) : 0;
+      $('#upgrade-progress-fill').style.width = pct + '%';
+      $('#upgrade-progress-text').textContent = `[${p.current}/${p.total}] ${p.message}`;
+
+      if (p.status === 'completed' || p.status === 'error') {
+        btn.disabled = false;
+        btn.textContent = '开始升级';
+        $('#upgrade-progress-text').textContent = (p.status === 'completed' ? '✅ ' : '⚠️ ') + p.message;
+      }
+    });
+
+    await invoke('start_batch_upgrade', { path, depth, multiThreaded: multi });
+  } catch (err) {
+    alert('升级失败: ' + err);
+    btn.disabled = false;
+    btn.textContent = '开始升级';
+  }
 }
 
 // ===== 启动 =====

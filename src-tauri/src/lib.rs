@@ -15,7 +15,7 @@ mod ims;
 mod ims_pack;
 
 use ims::{scan_folder, parse_ims, read_sub_image, is_ims_file, file_type_label, FilePayload, SubImagePayload};
-use ims_pack::{pack_ims, scan_multiple_folders, compute_output_path, BatchConfig, ProgressPayload};
+use ims_pack::{pack_ims, scan_multiple_folders, compute_output_path, upgrade_ims_file, scan_ims_files, BatchConfig, ProgressPayload};
 
 // ============================================================
 // Tauri Commands
@@ -277,6 +277,118 @@ async fn extract_all(app: tauri::AppHandle, path: String) -> Result<Vec<String>,
     Ok(saved_paths)
 }
 
+/// 批量升级：扫描 IMS 文件，升级到最新版本（v2 + SHA-256 hash）
+#[tauri::command]
+async fn start_batch_upgrade(
+    app: tauri::AppHandle,
+    path: String,
+    depth: u32,
+    multi_threaded: bool,
+) -> Result<String, String> {
+    let files = scan_ims_files(&path, depth);
+    let total = files.len() as u32;
+
+    if total == 0 {
+        return Err("未发现 IMS 文件".into());
+    }
+
+    let total_msg = format!("共发现 {} 个 IMS 文件", total);
+    let _ = app.emit("batch-progress", ProgressPayload {
+        current: 0,
+        total,
+        message: total_msg.clone(),
+        status: "running".into(),
+    });
+
+    let app_handle = app.clone();
+
+    std::thread::spawn(move || {
+        let result = if multi_threaded {
+            use rayon::prelude::*;
+            use std::sync::atomic::{AtomicU32, AtomicBool, Ordering};
+
+            let completed = AtomicU32::new(0);
+            let has_error = AtomicBool::new(false);
+
+            files.par_iter().for_each(|fp| {
+                let fname = Path::new(fp).file_name().and_then(|n| n.to_str()).unwrap_or(fp);
+                match upgrade_ims_file(fp) {
+                    Ok(()) => {
+                        let current = completed.fetch_add(1, Ordering::SeqCst) + 1;
+                        let _ = app_handle.emit("batch-progress", ProgressPayload {
+                            current,
+                            total,
+                            message: format!("已升级 {}", fname),
+                            status: "running".into(),
+                        });
+                    }
+                    Err(e) => {
+                        has_error.store(true, Ordering::SeqCst);
+                        let _ = app_handle.emit("batch-progress", ProgressPayload {
+                            current: completed.load(Ordering::SeqCst),
+                            total,
+                            message: format!("失败 {}: {}", fname, e),
+                            status: "running".into(),
+                        });
+                    }
+                }
+            });
+
+            if has_error.load(Ordering::SeqCst) {
+                Err("有文件升级失败".into())
+            } else {
+                Ok(())
+            }
+        } else {
+            let mut completed: u32 = 0;
+            for fp in &files {
+                let fname = Path::new(fp).file_name().and_then(|n| n.to_str()).unwrap_or(fp);
+                match upgrade_ims_file(fp) {
+                    Ok(()) => {
+                        completed += 1;
+                        let _ = app_handle.emit("batch-progress", ProgressPayload {
+                            current: completed,
+                            total,
+                            message: format!("已升级 {}", fname),
+                            status: "running".into(),
+                        });
+                    }
+                    Err(e) => {
+                        let _ = app_handle.emit("batch-progress", ProgressPayload {
+                            current: completed,
+                            total,
+                            message: format!("失败 {}: {}", fname, e),
+                            status: "running".into(),
+                        });
+                    }
+                }
+            }
+            Ok(())
+        };
+
+        match result {
+            Ok(()) => {
+                let _ = app_handle.emit("batch-progress", ProgressPayload {
+                    current: total,
+                    total,
+                    message: format!("全部完成，共 {} 个文件", total),
+                    status: "completed".into(),
+                });
+            }
+            Err(e) => {
+                let _ = app_handle.emit("batch-progress", ProgressPayload {
+                    current: total,
+                    total,
+                    message: e,
+                    status: "error".into(),
+                });
+            }
+        }
+    });
+
+    Ok(total_msg)
+}
+
 /// 批量转换：扫描文件夹，按命名规范分组并打包为 IMS 文件
 #[tauri::command]
 async fn start_batch_convert(
@@ -345,37 +457,36 @@ async fn start_batch_convert(
 
         let result = if multi {
             use rayon::prelude::*;
-            let results: Vec<Result<(), String>> = tasks
-                .par_iter()
-                .map(|task| convert(task))
-                .collect();
+            use std::sync::atomic::{AtomicU32, AtomicBool, Ordering};
 
-            let mut completed: u32 = 0;
-            let mut last_error: Option<String> = None;
-            for (i, r) in results.iter().enumerate() {
-                match r {
+            let completed = AtomicU32::new(0);
+            let has_error = AtomicBool::new(false);
+
+            tasks.par_iter().for_each(|task| {
+                match convert(task) {
                     Ok(()) => {
-                        completed += 1;
+                        let current = completed.fetch_add(1, Ordering::SeqCst) + 1;
                         let _ = app_handle.emit("batch-progress", ProgressPayload {
-                            current: completed,
+                            current,
                             total,
-                            message: tasks[i].message.clone(),
+                            message: task.message.clone(),
                             status: "running".into(),
                         });
                     }
                     Err(e) => {
-                        last_error = Some(e.clone());
+                        has_error.store(true, Ordering::SeqCst);
                         let _ = app_handle.emit("batch-progress", ProgressPayload {
-                            current: completed,
+                            current: completed.load(Ordering::SeqCst),
                             total,
                             message: format!("失败: {}", e),
                             status: "running".into(),
                         });
                     }
                 }
-            }
-            if let Some(e) = last_error {
-                Err(format!("有转换失败: {}", e))
+            });
+
+            if has_error.load(Ordering::SeqCst) {
+                Err("有转换失败".into())
             } else {
                 Ok(())
             }
@@ -444,6 +555,7 @@ pub fn run() {
             extract_image,
             extract_all,
             start_batch_convert,
+            start_batch_upgrade,
         ])
         .run(tauri::generate_context!())
         .expect("启动 imsViewer 失败");
