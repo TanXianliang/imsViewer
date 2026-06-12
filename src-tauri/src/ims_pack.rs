@@ -81,7 +81,9 @@ pub fn pack_ims(image_paths: &[String], cover_index: usize, output_path: &str) -
         let format: u8 = match ext.as_str() {
             "jpg" | "jpeg" => 0,
             "png" => 1,
-            _ => return Err(format!("不支持的图片格式: {} (仅支持 jpg/jpeg/png)", path)),
+            "webp" => 2,
+            "avif" => 3,
+            _ => return Err(format!("不支持的图片格式: {} (仅支持 jpg/jpeg/png/webp/avif)", path)),
         };
         if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
             if stem.to_lowercase().contains(".ims") {
@@ -92,9 +94,26 @@ pub fn pack_ims(image_paths: &[String], cover_index: usize, output_path: &str) -
             .and_then(|n| n.to_str())
             .unwrap_or("unknown")
             .to_string();
-        let bytes = std::fs::read(path)
+        let raw_bytes = std::fs::read(path)
             .map_err(|e| format!("读取文件失败 {}: {}", path, e))?;
-        entries.push(Entry { filename, format, bytes, is_cover: i == cover_index });
+
+        // WebP/AVIF → 自动转 PNG
+        let (final_bytes, final_format, final_filename) = if format == 2 || format == 3 {
+            let img = image::load_from_memory(&raw_bytes)
+                .map_err(|e| format!("解码 {} 失败: {} (格式: {})", path, e, if format == 2 { "WebP" } else { "AVIF" }))?;
+            let mut png_bytes = Vec::new();
+            img.write_to(&mut std::io::Cursor::new(&mut png_bytes), image::ImageFormat::Png)
+                .map_err(|e| format!("PNG 编码失败 {}: {}", path, e))?;
+            let new_name = format!(
+                "{}.png",
+                Path::new(&filename).file_stem().and_then(|s| s.to_str()).unwrap_or("image")
+            );
+            (png_bytes, 1u8, new_name)
+        } else {
+            (raw_bytes, format, filename)
+        };
+
+        entries.push(Entry { filename: final_filename, format: final_format, bytes: final_bytes, is_cover: i == cover_index });
     }
 
     // 封面排在第一位
@@ -162,10 +181,11 @@ pub fn scan_and_group(input_folder: &str, max_depth: u32) -> Result<Vec<ImageGro
     // 收集所有图片文件
     let mut all_files: Vec<(PathBuf, PathBuf)> = Vec::new(); // (file_path, parent_dir)
 
-    for entry in walkdir::WalkDir::new(input_folder)
-        .max_depth(max_depth as usize)
-        .into_iter()
-        .filter_map(|e| e.ok())
+    let mut walker = walkdir::WalkDir::new(input_folder);
+    if max_depth > 0 {
+        walker = walker.max_depth(max_depth as usize);
+    }
+    for entry in walker.into_iter().filter_map(|e| e.ok())
     {
         if !entry.file_type().is_file() {
             continue;
@@ -173,7 +193,7 @@ pub fn scan_and_group(input_folder: &str, max_depth: u32) -> Result<Vec<ImageGro
         let path = entry.path();
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
             let lower = ext.to_lowercase();
-            if lower == "jpg" || lower == "jpeg" || lower == "png" {
+            if lower == "jpg" || lower == "jpeg" || lower == "png" || lower == "webp" || lower == "avif" {
                 // 跳过已经是 IMS 的文件
                 if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                     if stem.to_lowercase().contains(".ims") {
@@ -226,11 +246,16 @@ pub fn scan_and_group(input_folder: &str, max_depth: u32) -> Result<Vec<ImageGro
         }
         sub_images.sort_by_key(|(seq, _)| *seq);
 
-        let cover_ext = cover
+        let raw_ext = cover
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("jpg")
             .to_lowercase();
+        // WebP/AVIF 会转为 PNG，输出扩展名改为 png
+        let cover_ext = match raw_ext.as_str() {
+            "webp" | "avif" => "png".to_string(),
+            other => other.to_string(),
+        };
 
         let source_dir = source_dir_opt.unwrap_or_else(|| dir_path.to_path_buf());
 

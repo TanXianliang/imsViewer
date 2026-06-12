@@ -74,6 +74,13 @@ function setupCanvasSize() {
   dom.canvas.height = rect.height;
 }
 
+// ===== 格式映射 =====
+const FORMAT_MIME = ['image/jpeg', 'image/png', 'image/webp', 'image/avif'];
+const FORMAT_LABEL = ['JPEG', 'PNG', 'WebP', 'AVIF'];
+
+function formatMime(fmt) { return FORMAT_MIME[fmt] || 'image/jpeg'; }
+function formatLabel(fmt) { return FORMAT_LABEL[fmt] || '未知'; }
+
 // ===== base64 转 Uint8Array =====
 function base64ToBytes(b64) {
   const binary = atob(b64);
@@ -90,7 +97,7 @@ function loadCurrentImage() {
   const sub = state.subImages[state.currentSubIdx];
   console.log('加载图片:', sub.filename, 'index:', state.currentSubIdx);
 
-  const mime = sub.format === 0 ? 'image/jpeg' : 'image/png';
+  const mime = formatMime(sub.format);
   const rawBytes = base64ToBytes(sub.bytes_base64);
   const blob = new Blob([rawBytes], { type: mime });
   const url = URL.createObjectURL(blob);
@@ -179,7 +186,7 @@ function buildThumbnails() {
 }
 
 function createThumbItem(sub, index) {
-  const mime = sub.format === 0 ? 'image/jpeg' : 'image/png';
+  const mime = formatMime(sub.format);
   const rawBytes = base64ToBytes(sub.bytes_base64);
   const blob = new Blob([rawBytes], { type: mime });
   const url = URL.createObjectURL(blob);
@@ -242,15 +249,17 @@ async function openFile(filepath) {
 
 async function navigateFile(delta) {
   if (state.folderList.length === 0) return;
-  const newIdx = state.currentFileIdx + delta;
-  if (newIdx < 0 || newIdx >= state.folderList.length) return;
+  let newIdx = state.currentFileIdx + delta;
+  if (newIdx < 0) newIdx = state.folderList.length - 1;
+  if (newIdx >= state.folderList.length) newIdx = 0;
   await openFile(state.folderList[newIdx].filepath);
 }
 
 async function navigateSub(delta) {
-  if (!state.imsInfo) return;
-  const newIdx = state.currentSubIdx + delta;
-  if (newIdx < 0 || newIdx >= state.subImages.length) return;
+  if (!state.imsInfo || state.subImages.length === 0) return;
+  let newIdx = state.currentSubIdx + delta;
+  if (newIdx < 0) newIdx = state.subImages.length - 1;
+  if (newIdx >= state.subImages.length) newIdx = 0;
   selectSubImage(newIdx);
 }
 
@@ -295,7 +304,7 @@ function updateCurrentImageInfo(sub) {
     return;
   }
   dom.infoImageName.textContent = sub.filename ?? '--';
-  dom.infoImageFormat.textContent = sub.format === 0 ? 'JPEG' : 'PNG';
+  dom.infoImageFormat.textContent = formatLabel(sub.format);
   dom.infoImageSize.textContent = formatSize(sub.data_length ?? 0);
 
   if (state.imgObj && state.currentSubIdx === (sub.index ?? 0)) {
@@ -510,6 +519,48 @@ function setupMenuActions() {
         case 'batch-convert':
           openBatchModal();
           break;
+        case 'help-shortcuts':
+          alert(
+            '═══ 键盘快捷键 ═══\n\n' +
+            '浏览导航:\n' +
+            '  ← →  切换上一个/下一个文件\n' +
+            '  ↑ ↓  切换上一个/下一个子图 (IMS)\n' +
+            '  Home  跳到第一个文件\n' +
+            '  End   跳到最后一个文件\n\n' +
+            '滚轮:\n' +
+            '  滚轮      切换文件\n' +
+            '  Shift+滚轮 切换子图\n' +
+            '  Ctrl+滚轮  缩放图片\n\n' +
+            '缩放:\n' +
+            '  + / -  放大 / 缩小\n' +
+            '  0      适应窗口\n' +
+            '  1      原始大小 (居中)\n' +
+            '  双击   适应窗口 ↔ 原始大小\n\n' +
+            '操作:\n' +
+            '  Ctrl+O       打开文件\n' +
+            '  Ctrl+E       导出当前图片\n' +
+            '  Ctrl+Shift+E 导出全部子图\n' +
+            '  拖放图片      打开文件'
+          );
+          break;
+        case 'help-usage':
+          alert(
+            '═══ 使用说明 ═══\n\n' +
+            '打开图片:\n' +
+            '  Ctrl+O 选择文件，或直接拖放图片到窗口\n\n' +
+            'IMS 格式:\n' +
+            '  文件名含 .ims (如 texture.ims.jpg)\n' +
+            '  封面在文件头，子图追加在后\n' +
+            '  ↑ ↓ 键切换子图，左侧显示缩略图\n\n' +
+            '批量转换:\n' +
+            '  工具 → 批量转换\n' +
+            '  添加文件夹 → 设置深度 → 开始\n' +
+            '  命名规范: 封面 name.jpg, 子图 name_00001_.jpg\n\n' +
+            '支持格式:\n' +
+            '  JPEG, PNG, WebP, AVIF\n' +
+            '  (WebP/AVIF 打包时自动转 PNG)'
+          );
+          break;
         case 'about':
           alert('imsViewer v1.0\nIMS 图片浏览器\n基于 Tauri v2 + Rust + Canvas');
           break;
@@ -590,7 +641,7 @@ function addFolderRow(path = '', depth = 0) {
   row.innerHTML = `
     <input class="path-input" type="text" placeholder="文件夹路径..." value="${escapeHtml(path)}" />
     <button class="btn-browse">浏览</button>
-    <label>深度 <input class="depth-input" type="number" min="0" max="100" value="${depth}" /></label>
+    <label title="0=无限深度">深度 <input class="depth-input" type="number" min="0" max="100" value="${depth}" /></label>
     <button class="btn-remove" title="移除">×</button>
   `;
   row.querySelector('.btn-browse').addEventListener('click', async () => {

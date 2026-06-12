@@ -22,3 +22,4 @@ base64 = "0.22"
 walkdir = "2"
 rayon = "1"
 regex = "1"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }

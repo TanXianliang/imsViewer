@@ -174,7 +174,7 @@ pub fn read_sub_image(filepath: &str, offset: u32, length: u32) -> Result<Vec<u8
 // ---- 文件夹扫描 ----
 
 /// 支持的图片扩展名
-const SUPPORTED_EXTS: &[&str] = &["jpg", "jpeg", "png"];
+const SUPPORTED_EXTS: &[&str] = &["jpg", "jpeg", "png", "webp", "avif"];
 
 /// 扫描目录，返回排序后的可浏览文件列表
 pub fn scan_folder(dir_path: &str) -> Result<Vec<FolderEntry>, String> {
@@ -286,6 +286,10 @@ pub fn file_type_label(filepath: &str) -> String {
         "JPEG".into()
     } else if lower.ends_with(".png") {
         "PNG".into()
+    } else if lower.ends_with(".webp") {
+        "WebP".into()
+    } else if lower.ends_with(".avif") {
+        "AVIF".into()
     } else {
         "未知".into()
     }
