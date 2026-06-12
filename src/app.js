@@ -5,6 +5,7 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { listen } from '@tauri-apps/api/event';
 
 // ===== State =====
 const state = {
@@ -506,6 +507,9 @@ function setupMenuActions() {
         case 'zoom-out':
           zoomAt(0.8, dom.canvas.width / 2, dom.canvas.height / 2);
           break;
+        case 'batch-convert':
+          openBatchModal();
+          break;
         case 'about':
           alert('imsViewer v1.0\nIMS 图片浏览器\n基于 Tauri v2 + Rust + Canvas');
           break;
@@ -556,6 +560,125 @@ function formatSize(bytes) {
   if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + ' MB';
   if (bytes >= 1024) return (bytes / 1024).toFixed(1) + ' KB';
   return bytes + ' bytes';
+}
+
+// ===== 批量转换模态框 =====
+let batchUnlisten = null;
+
+function openBatchModal() {
+  const modal = $('#batch-modal');
+  modal.style.display = 'flex';
+  $('#folder-list').innerHTML = '';
+  addFolderRow();
+  $('#progress-fill').style.width = '0%';
+  $('#progress-text').textContent = '准备就绪';
+  $('#btn-start-convert').disabled = false;
+  setupBatchEvents();
+}
+
+function closeBatchModal() {
+  $('#batch-modal').style.display = 'none';
+  if (batchUnlisten) {
+    batchUnlisten();
+    batchUnlisten = null;
+  }
+}
+
+function addFolderRow(path = '', depth = 0) {
+  const row = document.createElement('div');
+  row.className = 'folder-row';
+  row.innerHTML = `
+    <input class="path-input" type="text" placeholder="文件夹路径..." value="${escapeHtml(path)}" />
+    <button class="btn-browse">浏览</button>
+    <label>深度 <input class="depth-input" type="number" min="0" max="100" value="${depth}" /></label>
+    <button class="btn-remove" title="移除">×</button>
+  `;
+  row.querySelector('.btn-browse').addEventListener('click', async () => {
+    try {
+      const dir = await invoke('pick_folder');
+      if (dir) row.querySelector('.path-input').value = dir;
+    } catch (e) { console.error('选择文件夹失败:', e); }
+  });
+  row.querySelector('.btn-remove').addEventListener('click', () => {
+    row.remove();
+    if ($('#folder-list').children.length === 0) addFolderRow();
+  });
+  $('#folder-list').appendChild(row);
+}
+
+function collectBatchConfig() {
+  const folders = [];
+  $$('#folder-list .folder-row').forEach(row => {
+    const path = row.querySelector('.path-input').value.trim();
+    const depth = parseInt(row.querySelector('.depth-input').value) || 0;
+    if (path) folders.push({ path, depth: Math.min(100, Math.max(0, depth)) });
+  });
+  const outputDir = $('#output-dir-input').value.trim();
+  return {
+    folders,
+    delete_source: $('#chk-delete-source').checked,
+    multi_threaded: $('#chk-multi-thread').checked,
+    output_dir: outputDir || null,
+  };
+}
+
+async function startBatchConvert() {
+  const config = collectBatchConfig();
+  if (config.folders.length === 0) {
+    alert('请至少添加一个文件夹');
+    return;
+  }
+
+  const btn = $('#btn-start-convert');
+  btn.disabled = true;
+  btn.textContent = '转换中...';
+  $('#progress-text').textContent = '正在扫描文件...';
+
+  try {
+    // 注册进度监听
+    if (batchUnlisten) batchUnlisten();
+    batchUnlisten = await listen('batch-progress', (event) => {
+      const p = event.payload;
+      const pct = p.total > 0 ? Math.round((p.current / p.total) * 100) : 0;
+      $('#progress-fill').style.width = pct + '%';
+      $('#progress-text').textContent = `[${p.current}/${p.total}] ${p.message}`;
+
+      if (p.status === 'completed' || p.status === 'error') {
+        btn.disabled = false;
+        btn.textContent = '开始转换';
+        if (p.status === 'completed') {
+          $('#progress-text').textContent = `✅ ${p.message}`;
+        } else {
+          $('#progress-text').textContent = `⚠️ ${p.message}`;
+        }
+      }
+    });
+
+    await invoke('start_batch_convert', { config });
+  } catch (err) {
+    alert('启动转换失败: ' + err);
+    btn.disabled = false;
+    btn.textContent = '开始转换';
+  }
+}
+
+function setupBatchEvents() {
+  $('#btn-add-folder').onclick = () => addFolderRow();
+  $('#btn-modal-close').onclick = () => closeBatchModal();
+  $('#btn-cancel-convert').onclick = () => closeBatchModal();
+  $('#btn-start-convert').onclick = () => startBatchConvert();
+  $('#btn-browse-output').onclick = async () => {
+    try {
+      const dir = await invoke('pick_folder');
+      if (dir) $('#output-dir-input').value = dir;
+    } catch (e) { console.error('选择文件夹失败:', e); }
+  };
+  // 默认添加一行空文件夹
+  if ($('#folder-list').children.length === 0) addFolderRow();
+}
+
+function escapeHtml(str) {
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
 // ===== 启动 =====

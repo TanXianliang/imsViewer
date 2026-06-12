@@ -490,7 +490,8 @@ imsViewer/
 │   └── src/
 │       ├── main.rs
 │       ├── lib.rs
-│       └── ims.rs
+│       ├── ims.rs
+│       └── ims_pack.rs        # 批量转换 + IMS 打包
 │
 ├── package.json            # 🆕 npm 依赖 (tauri-cli)
 ├── vite.config.js          # 🆕 Vite 构建配置
@@ -528,4 +529,59 @@ tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 byteorder = "1"
+base64 = "0.22"
+walkdir = "2"
+rayon = "1"
+regex = "1"
+```
+
+---
+
+## 13. 批量转换工具
+
+### 13.1 入口
+
+菜单栏 **工具 → 批量转换** 打开模态框。
+
+### 13.2 功能
+
+| 功能 | 说明 |
+|------|------|
+| 多文件夹 | 动态添加/删除，每行可设遍历深度 (0-100，默认0) |
+| 输出目录 | 留空=原地转换；填写后镜像输入目录结构输出 |
+| 自动跳过 IMS | 扫描时跳过 stem 含 `.ims` 的已打包文件 |
+| 删除源文件 | 勾选后转换成功即删除原始图片 |
+| 多线程 | 勾选后用 rayon 并行转换 |
+| 实时进度 | 进度条 + `[当前/总数] 文件名` 文字 |
+
+### 13.3 镜像输出示例
+
+```
+输出目录: Output
+输入目录: Input0, Input1
+
+Input1/tex0/image0.jpg + image0_00001_.jpg + image0_00002_.jpg
+  → Output/Input1/tex0/image0.ims.jpg
+```
+
+### 13.4 文件分组规则
+
+- 封面: `{base}.{ext}`
+- 子图: `{base}_XXXXX_.{ext}`（5 位数字序号）
+- 输出: `{base}.ims.{cover_ext}`
+
+### 13.5 架构
+
+```
+前端模态框                    Rust 后端                      文件系统
+─────────────────────────────────────────────────────────────────
+invoke('start_batch_convert', config)
+                              ↓
+                              scan_and_group()  × N 文件夹    → walkdir 遍历
+                              ↓
+                              pack_ims()        × M 组       → 写入 IMS 文件
+                              ↓ 每完成一个
+                              emit("batch-progress")          ← 进度
+listen("batch-progress")  ←
+更新进度条
 ```

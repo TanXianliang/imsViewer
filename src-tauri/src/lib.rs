@@ -9,10 +9,13 @@
 
 use base64::Engine;
 use std::path::Path;
+use tauri::Emitter;
 
 mod ims;
+mod ims_pack;
 
 use ims::{scan_folder, parse_ims, read_sub_image, is_ims_file, file_type_label, FilePayload, SubImagePayload};
+use ims_pack::{pack_ims, scan_multiple_folders, compute_output_path, BatchConfig, ProgressPayload};
 
 // ============================================================
 // Tauri Commands
@@ -141,6 +144,19 @@ async fn pick_file(app: tauri::AppHandle) -> Result<Option<String>, String> {
     Ok(result.map(|p| p.to_string()))
 }
 
+/// 弹出文件夹选择对话框
+#[tauri::command]
+async fn pick_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let result = app
+        .dialog()
+        .file()
+        .blocking_pick_folder();
+
+    Ok(result.map(|p| p.to_string()))
+}
+
 /// 按需获取 IMS 文件中指定索引的子图数据（base64）
 #[tauri::command]
 fn get_sub_image(path: String, index: usize) -> Result<SubImagePayload, String> {
@@ -258,6 +274,157 @@ async fn extract_all(app: tauri::AppHandle, path: String) -> Result<Vec<String>,
     Ok(saved_paths)
 }
 
+/// 批量转换：扫描文件夹，按命名规范分组并打包为 IMS 文件
+#[tauri::command]
+async fn start_batch_convert(
+    app: tauri::AppHandle,
+    config: BatchConfig,
+) -> Result<String, String> {
+    // 1. 扫描所有文件夹，分组
+    let groups = scan_multiple_folders(&config.folders)?;
+    let total = groups.len() as u32;
+
+    if total == 0 {
+        return Err("没有找到可转换的图片组（需有封面 + 至少一张子图）".into());
+    }
+
+    let total_msg = format!("共发现 {} 组可转换", total);
+    let _ = app.emit("batch-progress", ProgressPayload {
+        current: 0,
+        total,
+        message: total_msg.clone(),
+        status: "running".into(),
+    });
+
+    // 2. 构建任务列表
+    let output_dir = config.output_dir.clone();
+    struct Task {
+        image_paths: Vec<String>,
+        output_path: String,
+        source_files: Vec<String>,
+        message: String,
+    }
+
+    let tasks: Vec<Task> = groups.iter().map(|g| {
+        let output_filename = format!("{}.ims.{}", g.base_name, g.cover_ext);
+        let output_path = compute_output_path(g, &output_dir);
+
+        let mut image_paths = vec![g.cover.to_string_lossy().to_string()];
+        let mut source_files = vec![g.cover.to_string_lossy().to_string()];
+        for (_, sub_path) in &g.sub_images {
+            image_paths.push(sub_path.to_string_lossy().to_string());
+            source_files.push(sub_path.to_string_lossy().to_string());
+        }
+
+        Task {
+            image_paths,
+            output_path,
+            source_files,
+            message: format!("已转换 {}", output_filename),
+        }
+    }).collect();
+
+    // 3. 执行转换
+    let delete_source = config.delete_source;
+    let multi = config.multi_threaded;
+    let app_handle = app.clone();
+
+    std::thread::spawn(move || {
+        let convert = |task: &Task| -> Result<(), String> {
+            pack_ims(&task.image_paths, 0, &task.output_path)?;
+            if delete_source {
+                for src in &task.source_files {
+                    let _ = std::fs::remove_file(src);
+                }
+            }
+            Ok(())
+        };
+
+        let result = if multi {
+            use rayon::prelude::*;
+            let results: Vec<Result<(), String>> = tasks
+                .par_iter()
+                .map(|task| convert(task))
+                .collect();
+
+            let mut completed: u32 = 0;
+            let mut last_error: Option<String> = None;
+            for (i, r) in results.iter().enumerate() {
+                match r {
+                    Ok(()) => {
+                        completed += 1;
+                        let _ = app_handle.emit("batch-progress", ProgressPayload {
+                            current: completed,
+                            total,
+                            message: tasks[i].message.clone(),
+                            status: "running".into(),
+                        });
+                    }
+                    Err(e) => {
+                        last_error = Some(e.clone());
+                        let _ = app_handle.emit("batch-progress", ProgressPayload {
+                            current: completed,
+                            total,
+                            message: format!("失败: {}", e),
+                            status: "running".into(),
+                        });
+                    }
+                }
+            }
+            if let Some(e) = last_error {
+                Err(format!("有转换失败: {}", e))
+            } else {
+                Ok(())
+            }
+        } else {
+            let mut completed: u32 = 0;
+            for task in &tasks {
+                match convert(task) {
+                    Ok(()) => {
+                        completed += 1;
+                        let _ = app_handle.emit("batch-progress", ProgressPayload {
+                            current: completed,
+                            total,
+                            message: task.message.clone(),
+                            status: "running".into(),
+                        });
+                    }
+                    Err(e) => {
+                        let _ = app_handle.emit("batch-progress", ProgressPayload {
+                            current: completed,
+                            total,
+                            message: format!("失败: {}", e),
+                            status: "running".into(),
+                        });
+                    }
+                }
+            }
+            Ok(())
+        };
+
+        match result {
+            Ok(()) => {
+                let _ = app_handle.emit("batch-progress", ProgressPayload {
+                    current: total,
+                    total,
+                    message: format!("全部完成，共 {} 组", total),
+                    status: "completed".into(),
+                });
+            }
+            Err(e) => {
+                let _ = app_handle.emit("batch-progress", ProgressPayload {
+                    current: total,
+                    total,
+                    message: e,
+                    status: "error".into(),
+                });
+            }
+        }
+    });
+
+    Ok(total_msg)
+}
+
 // ============================================================
 // Tauri 应用入口
 // ============================================================
@@ -269,9 +436,11 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             open_file,
             pick_file,
+            pick_folder,
             get_sub_image,
             extract_image,
             extract_all,
+            start_batch_convert,
         ])
         .run(tauri::generate_context!())
         .expect("启动 imsViewer 失败");
