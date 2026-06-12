@@ -17,11 +17,13 @@ pub const MAGIC: &[u8; 8] = b"IMSIMAGE";
 pub struct ImsImage {
     pub index: usize,
     pub filename: String,
-    /// 0 = JPEG, 1 = PNG
+    /// 0 = JPEG, 1 = PNG, 2 = WebP, 3 = AVIF
     pub format: u8,
     pub data_offset: u32,
     pub data_length: u32,
     pub is_cover: bool,
+    /// SHA-256 内容哈希 (hex, v2+)
+    pub hash: Option<String>,
 }
 
 /// IMS 文件整体元数据
@@ -77,6 +79,8 @@ pub struct SubImagePayload {
     pub is_cover: bool,
     /// 图片原始字节 (base64 编码)
     pub bytes_base64: String,
+    /// SHA-256 内容哈希 (hex, v2+)
+    pub hash: Option<String>,
 }
 
 // ---- IMS 解析 ----
@@ -120,7 +124,7 @@ pub fn parse_ims(filepath: &str) -> Result<ImsFileInfo, String> {
     let image_count = c.read_u32::<LittleEndian>().unwrap();
     let data_start = c.read_u32::<LittleEndian>().unwrap();
 
-    if version != 1 {
+    if version != 1 && version != 2 {
         return Err(format!("不支持的 IMS 版本: {}", version));
     }
 
@@ -139,6 +143,22 @@ pub fn parse_ims(filepath: &str) -> Result<ImsFileInfo, String> {
         let data_length = c.read_u32::<LittleEndian>().unwrap();
         let is_cover_byte = c.read_u8().unwrap();
 
+        // v2+: 读取 hash
+        let hash = if version >= 2 {
+            let hash_algo = c.read_u8().unwrap();
+            if hash_algo == 1 {
+                // SHA-256: 32 bytes → hex
+                let mut hash_buf = [0u8; 32];
+                c.read_exact(&mut hash_buf)
+                    .map_err(|e| format!("读取图片 {} hash 失败: {}", i, e))?;
+                Some(hash_buf.iter().map(|b| format!("{:02x}", b)).collect())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         images.push(ImsImage {
             index: i,
             filename,
@@ -146,6 +166,7 @@ pub fn parse_ims(filepath: &str) -> Result<ImsFileInfo, String> {
             data_offset,
             data_length,
             is_cover: is_cover_byte != 0,
+            hash,
         });
     }
 

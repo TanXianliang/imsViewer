@@ -5,13 +5,15 @@
 use byteorder::{LittleEndian, WriteBytesExt};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use sha2::{Sha256, Digest};
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// IMS 文件魔数
 const MAGIC: &[u8; 8] = b"IMSIMAGE";
-const VERSION: u16 = 1;
+const VERSION: u16 = 2;
+const HASH_ALGO_SHA256: u8 = 1;
 
 /// 图片组：一个封面 + 若干子图，记录来源文件夹
 #[derive(Debug)]
@@ -31,6 +33,7 @@ pub struct BatchConfig {
     pub delete_source: bool,
     pub multi_threaded: bool,
     pub output_dir: Option<String>,
+    pub preserve_structure: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,7 +153,7 @@ pub fn pack_ims(image_paths: &[String], cover_index: usize, output_path: &str) -
     out.write_u32::<LittleEndian>(count as u32).map_err(|e| format!("写入 image_count 失败: {}", e))?;
     out.write_u32::<LittleEndian>(0).map_err(|e| format!("写入 data_start 失败: {}", e))?;
 
-    // 3. 写入每个 entry
+    // 3. 写入每个 entry (v2: 带 SHA-256 hash)
     for (i, entry) in entries.iter().enumerate() {
         let name_bytes = entry.filename.as_bytes();
         out.write_u16::<LittleEndian>(name_bytes.len() as u16).map_err(|e| format!("写入 name_len 失败: {}", e))?;
@@ -159,6 +162,13 @@ pub fn pack_ims(image_paths: &[String], cover_index: usize, output_path: &str) -
         out.write_u32::<LittleEndian>(offsets[i]).map_err(|e| format!("写入 offset 失败: {}", e))?;
         out.write_u32::<LittleEndian>(entry.bytes.len() as u32).map_err(|e| format!("写入 length 失败: {}", e))?;
         out.write_u8(if entry.is_cover { 1 } else { 0 }).map_err(|e| format!("写入 is_cover 失败: {}", e))?;
+
+        // v2: SHA-256 hash
+        let mut hasher = Sha256::new();
+        hasher.update(&entry.bytes);
+        let hash = hasher.finalize();
+        out.write_u8(HASH_ALGO_SHA256).map_err(|e| format!("写入 hash_algo 失败: {}", e))?;
+        out.write_all(&hash).map_err(|e| format!("写入 hash 失败: {}", e))?;
     }
 
     // 4. 写入 index_offset
@@ -292,16 +302,23 @@ pub fn scan_multiple_folders(folders: &[FolderConfig]) -> Result<Vec<ImageGroup>
 pub fn compute_output_path(
     group: &ImageGroup,
     output_dir: &Option<String>,
+    preserve_structure: bool,
 ) -> String {
     let output_filename = format!("{}.ims.{}", group.base_name, group.cover_ext);
     if let Some(out_dir) = output_dir {
-        // 计算 source_dir 相对于 input_folder 的路径
-        let input_base = Path::new(&group.input_folder);
-        let rel = group.source_dir
-            .strip_prefix(input_base)
-            .unwrap_or(&group.source_dir);
-        let out_path = Path::new(out_dir).join(rel).join(&output_filename);
-        out_path.to_string_lossy().to_string()
+        if preserve_structure {
+            // 用 input_folder 的父目录作为基准，保留输入文件夹名本身
+            let input_base = Path::new(&group.input_folder)
+                .parent()
+                .unwrap_or(Path::new(&group.input_folder));
+            let rel = group.source_dir
+                .strip_prefix(input_base)
+                .unwrap_or(&group.source_dir);
+            let out_path = Path::new(out_dir).join(rel).join(&output_filename);
+            out_path.to_string_lossy().to_string()
+        } else {
+            Path::new(out_dir).join(&output_filename).to_string_lossy().to_string()
+        }
     } else {
         group.source_dir.join(&output_filename).to_string_lossy().to_string()
     }

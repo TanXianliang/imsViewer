@@ -43,6 +43,7 @@ const dom = {
   infoImageResolution: $('#info-image-resolution'),
   infoImageSize: $('#info-image-size'),
   infoImageOffset: $('#info-image-offset'),
+  infoImageHash: $('#info-image-hash'),
   statusFilePos: $('#status-file-pos'),
   statusSubPos: $('#status-sub-pos'),
   statusZoom: $('#status-zoom'),
@@ -313,10 +314,13 @@ function updateCurrentImageInfo(sub) {
     dom.infoImageResolution.textContent = '--';
   }
   dom.infoImageOffset.textContent = sub.data_offset !== undefined ? String(sub.data_offset) : '--';
+  const hash = sub.hash || '--';
+  dom.infoImageHash.textContent = hash.length > 20 ? hash.substring(0, 20) + '...' : hash;
+  dom.infoImageHash.title = hash; // 悬浮看完整 hash
 }
 
 function toggleImsRows(visible) {
-  const rows = ['#row-ims-version', '#row-image-count', '#row-cover-file', '#row-image-offset'];
+  const rows = ['#row-ims-version', '#row-image-count', '#row-cover-file', '#row-image-offset', '#row-image-hash'];
   rows.forEach(sel => {
     const el = $(sel);
     if (el) el.style.display = visible ? '' : 'none';
@@ -670,6 +674,7 @@ function collectBatchConfig() {
     delete_source: $('#chk-delete-source').checked,
     multi_threaded: $('#chk-multi-thread').checked,
     output_dir: outputDir || null,
+    preserve_structure: $('#chk-preserve-structure').checked,
   };
 }
 

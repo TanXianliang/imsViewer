@@ -81,6 +81,7 @@ fn open_file(path: String) -> Result<FilePayload, String> {
                     data_length: img.data_length,
                     is_cover: img.is_cover,
                     bytes_base64,
+                    hash: img.hash.clone(),
                 }
             })
             .collect();
@@ -112,6 +113,7 @@ fn open_file(path: String) -> Result<FilePayload, String> {
             data_length: raw_bytes.len() as u32,
             is_cover: true,
             bytes_base64,
+            hash: None,
         }];
 
         Ok(FilePayload {
@@ -182,6 +184,7 @@ fn get_sub_image(path: String, index: usize) -> Result<SubImagePayload, String> 
         data_length: img.data_length,
         is_cover: img.is_cover,
         bytes_base64,
+        hash: img.hash.clone(),
     })
 }
 
@@ -307,7 +310,7 @@ async fn start_batch_convert(
 
     let tasks: Vec<Task> = groups.iter().map(|g| {
         let output_filename = format!("{}.ims.{}", g.base_name, g.cover_ext);
-        let output_path = compute_output_path(g, &output_dir);
+        let output_path = compute_output_path(g, &output_dir, config.preserve_structure);
 
         let mut image_paths = vec![g.cover.to_string_lossy().to_string()];
         let mut source_files = vec![g.cover.to_string_lossy().to_string()];
