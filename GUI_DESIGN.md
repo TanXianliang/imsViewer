@@ -139,13 +139,17 @@ index.html
 ### 4.2 Rust 后端 (Tauri Commands)
 
 ```rust
-// 暴露给前端的 6 个命令
+// 暴露给前端的 10 个命令
 #[tauri::command] fn open_file(path: String) -> Result<FilePayload, String>
-#[tauri::command] fn scan_folder(path: String) -> Vec<FolderEntry>
-#[tauri::command] fn get_sub_image(path: String, index: usize) -> Result<ImagePayload, String>
-#[tauri::command] fn extract_image(path: String, index: usize, out_dir: String) -> Result<String, String>
-#[tauri::command] fn extract_all(path: String, out_dir: String) -> Result<Vec<String>, String>
-#[tauri::command] fn get_supported_files(dir: String) -> Vec<FolderEntry>
+#[tauri::command] fn pick_file(app: AppHandle) -> Result<Option<String>, String>
+#[tauri::command] fn pick_folder(app: AppHandle) -> Result<Option<String>, String>
+#[tauri::command] fn get_sub_image(path: String, index: usize) -> Result<SubImagePayload, String>
+#[tauri::command] fn extract_image(app: AppHandle, path: String, index: usize) -> Result<String, String>
+#[tauri::command] fn extract_all(app: AppHandle, path: String) -> Result<Vec<String>, String>
+#[tauri::command] fn start_batch_convert(app: AppHandle, config: BatchConfig) -> Result<String, String>
+#[tauri::command] fn start_batch_upgrade(app: AppHandle, path: String, depth: u32, multi_threaded: bool) -> Result<String, String>
+#[tauri::command] fn register_file_associations() -> Result<String, String>
+#[tauri::command] fn get_launch_file(state: State<LaunchFile>) -> Result<Option<String>, String>
 ```
 
 ### 4.3 核心数据流
@@ -252,10 +256,12 @@ pub const MAGIC: &[u8; 8] = b"IMSIMAGE";
 pub struct ImsImage {
     pub index: usize,
     pub filename: String,
-    pub format: u8,       // 0=JPEG, 1=PNG
+    pub format: u8,       // 0=JPEG, 1=PNG, 2=WebP, 3=AVIF
     pub data_offset: u32,
     pub data_length: u32,
     pub is_cover: bool,
+    /// SHA-256 内容哈希 (hex, v2+)
+    pub hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -350,6 +356,8 @@ pub fn parse_ims(filepath: &str) -> Result<ImsFileInfo, String> {
 |--------|------|------|
 | `←` | 文件夹层 | 上一个文件 |
 | `→` | 文件夹层 | 下一个文件 |
+| `Home` | 文件夹层 | 跳到第一个文件 |
+| `End` | 文件夹层 | 跳到最后一个文件 |
 | `↑` | IMS 子图层 | 上一张子图 |
 | `↓` | IMS 子图层 | 下一张子图 |
 
@@ -373,7 +381,7 @@ pub fn parse_ims(filepath: &str) -> Result<ImsFileInfo, String> {
 | 滚轮 | 切换子图 |
 | Shift+滚轮 | 切换文件 |
 | Ctrl+滚轮 | 缩放图片 |
-| 拖拽 | 平移（放大后） |
+| 拖拽 | 平移（任意缩放级别均可） |
 | 双击中央区 | 适应窗口 ↔ 100% |
 
 ---
@@ -616,13 +624,62 @@ listen("batch-progress")  ←
 
 ---
 
-## 14. IMS 按需加载策略
+## 14. 批量升级工具
 
-### 14.1 问题
+### 14.1 入口
+
+菜单栏 **工具 → 批量升级 IMS** 打开升级模态框。
+
+### 14.2 功能
+
+将旧版 IMS 文件（v1）就地升级到 v2，追加 SHA-256 内容哈希。
+
+| 功能 | 说明 |
+|------|------|
+| 目录扫描 | 选择目录递归扫描所有 IMS 文件 |
+| 深度控制 | 同批量转换，0=无限遍历 |
+| 版本检测 | 自动跳过已是 v2+ 的文件 |
+| 多线程 | 可选 rayon 并行升级 |
+| 实时进度 | 进度条 + 文件名反馈 |
+
+### 14.3 升级流程
+
+1. 解析旧 IMS，读取全部子图数据
+2. 以 v2 格式重新写入（封面排第一，每张子图追加 SHA-256 hash）
+3. 写入临时文件后替换原文件（保证原子性）
+
+---
+
+## 15. 右键菜单注册
+
+### 15.1 入口
+
+菜单栏 **工具 → 注册右键菜单**，或通过安装包自动注册。
+
+### 15.2 注册的扩展名
+
+| 组 | 扩展名 |
+|----|--------|
+| 普通图片 | `.jpg` `.jpeg` `.png` `.webp` `.avif` |
+| IMS 容器 | `.ims.jpg` `.ims.png` |
+
+### 15.3 实现
+
+通过 `reg add` 命令在 `HKCU\Software\Classes\SystemFileAssociations` 下为每个扩展名注册 shell 命令。右键图片文件即出现"使用 imsViewer 打开"菜单项。
+
+### 15.4 启动文件
+
+`get_launch_file` 命令读取启动时传入的文件路径（来自右键"打开方式"或命令行参数），前端初始化后自动打开该文件。
+
+---
+
+## 16. IMS 按需加载策略
+
+### 16.1 问题
 
 打开 IMS 文件时一次性读取全部子图 + base64 编码 → 大文件非常慢。
 
-### 14.2 优化
+### 16.2 优化
 
 | 阶段 | 行为 |
 |------|------|
