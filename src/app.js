@@ -402,11 +402,11 @@ function setupMouse() {
       const factor = e.deltaY < 0 ? 1.15 : 0.87;
       zoomAt(factor, e.clientX - rect.left, e.clientY - rect.top);
     } else if (e.shiftKey) {
-      // Shift+滚轮：切换子图
-      navigateSub(e.deltaY > 0 ? 1 : -1);
-    } else {
-      // 直接滚轮：切换文件
+      // Shift+滚轮：切换文件
       navigateFile(e.deltaY > 0 ? 1 : -1);
+    } else {
+      // 直接滚轮：切换子图
+      navigateSub(e.deltaY > 0 ? 1 : -1);
     }
   });
 
