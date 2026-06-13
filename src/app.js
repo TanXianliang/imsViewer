@@ -68,11 +68,16 @@ function init() {
   console.log('imsViewer 前端初始化完成');
 }
 
-// ===== Canvas 尺寸适配 =====
+// ===== Canvas 尺寸适配（支持高 DPI） =====
+let dpr = window.devicePixelRatio || 1;
+
 function setupCanvasSize() {
   const rect = $('#center-panel').getBoundingClientRect();
-  dom.canvas.width = rect.width;
-  dom.canvas.height = rect.height;
+  const cw = rect.width, ch = rect.height;
+  dom.canvas.width = cw * dpr;
+  dom.canvas.height = ch * dpr;
+  dom.canvas.style.width = cw + 'px';
+  dom.canvas.style.height = ch + 'px';
 }
 
 // ===== 格式映射 =====
@@ -120,10 +125,13 @@ function loadCurrentImage() {
   img.src = url;
 }
 
+function cssWidth() { return dom.canvas.width / dpr; }
+function cssHeight() { return dom.canvas.height / dpr; }
+
 function fitToWindow() {
   if (!state.imgObj) return;
-  const cw = dom.canvas.width;
-  const ch = dom.canvas.height;
+  const cw = cssWidth();
+  const ch = cssHeight();
   const sx = cw / state.imgObj.width;
   const sy = ch / state.imgObj.height;
   state.scale = Math.min(sx, sy);
@@ -135,9 +143,9 @@ function fitToWindow() {
 
 function centerOriginal() {
   if (!state.imgObj) return;
-  state.scale = 1.0;
-  state.offsetX = (dom.canvas.width - state.imgObj.width) / 2;
-  state.offsetY = (dom.canvas.height - state.imgObj.height) / 2;
+  state.scale = 1.0 / dpr;  // 1 image pixel = 1 physical screen pixel
+  state.offsetX = (cssWidth() - state.imgObj.width * state.scale) / 2;
+  state.offsetY = (cssHeight() - state.imgObj.height * state.scale) / 2;
   state.isFitMode = false;
   updateZoomLabel();
 }
@@ -145,17 +153,17 @@ function centerOriginal() {
 function drawImage() {
   if (!state.imgObj) return;
   const ctx = dom.ctx;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, dom.canvas.width, dom.canvas.height);
-  ctx.save();
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.translate(state.offsetX, state.offsetY);
   ctx.scale(state.scale, state.scale);
   ctx.drawImage(state.imgObj, 0, 0);
-  ctx.restore();
 }
 
 function zoomAt(factor, cx, cy) {
   const oldScale = state.scale;
-  state.scale = Math.max(0.05, Math.min(20, state.scale * factor));
+  state.scale = Math.max(0.05 / dpr, Math.min(20 / dpr, state.scale * factor));
   state.offsetX = cx - (cx - state.offsetX) * (state.scale / oldScale);
   state.offsetY = cy - (cy - state.offsetY) * (state.scale / oldScale);
   state.isFitMode = false;
@@ -163,8 +171,9 @@ function zoomAt(factor, cx, cy) {
   drawImage();
 }
 
+// 显示物理缩放比例（相对于屏幕像素）
 function updateZoomLabel() {
-  dom.statusZoom.textContent = Math.round(state.scale * 100) + '%';
+  dom.statusZoom.textContent = Math.round(state.scale * dpr * 100) + '%';
 }
 
 // ===== 缩略图 =====

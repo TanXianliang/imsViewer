@@ -193,8 +193,7 @@ body {
   overflow: hidden;
 }
 #image-canvas {
-  max-width: 100%;
-  max-height: 100%;
+  display: block;
   cursor: grab;
 }
 #image-canvas:active { cursor: grabbing; }
