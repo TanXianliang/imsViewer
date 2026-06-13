@@ -586,10 +586,19 @@ async fn start_batch_convert(
 // Tauri 应用入口
 // ============================================================
 
+/// 返回通过命令行传入的启动文件路径（右键"打开方式"传入）
+#[tauri::command]
+fn get_launch_file(state: tauri::State<'_, LaunchFile>) -> Result<Option<String>, String> {
+    Ok(state.0.clone())
+}
+
+pub struct LaunchFile(pub Option<String>);
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
+pub fn run(launch_file: Option<String>) {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .manage(LaunchFile(launch_file))
         .invoke_handler(tauri::generate_handler![
             open_file,
             pick_file,
@@ -600,6 +609,7 @@ pub fn run() {
             start_batch_convert,
             start_batch_upgrade,
             register_file_associations,
+            get_launch_file,
         ])
         .run(tauri::generate_context!())
         .expect("启动 imsViewer 失败");

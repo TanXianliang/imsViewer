@@ -815,3 +815,16 @@ async function registerAssociations() {
 // ===== 启动 =====
 console.log('Tauri API:', typeof invoke);
 init();
+
+// 处理右键"使用 imsViewer 打开"传入的文件路径
+(async () => {
+  try {
+    const path = await invoke('get_launch_file');
+    if (path) {
+      console.log('启动文件:', path);
+      await openFile(path);
+    }
+  } catch (e) {
+    console.error('获取启动文件失败:', e);
+  }
+})();
