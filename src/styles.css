@@ -174,6 +174,17 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.thumb-loading {
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(90deg, var(--bg-tertiary) 25%, var(--bg-hover) 50%, var(--bg-tertiary) 75%);
+  background-size: 200% 100%;
+  animation: thumb-shimmer 1.5s infinite;
+}
+@keyframes thumb-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
 .cover-badge {
   position: absolute;
   top: 2px;

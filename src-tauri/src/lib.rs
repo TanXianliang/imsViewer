@@ -66,13 +66,17 @@ fn open_file(path: String) -> Result<FilePayload, String> {
         // ---- IMS 文件 ----
         let ims_info = parse_ims(&path)?;
 
-        // 构建 sub_images：封面数据 + 其余仅元数据
+        // 按需加载：仅封面或首张图在打开时编码，其余延迟到切换时加载
         let sub_images: Vec<SubImagePayload> = ims_info
             .images
             .iter()
             .map(|img| {
-                let bytes = read_sub_image(&path, img.data_offset, img.data_length).unwrap_or_default();
-                let bytes_base64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                let bytes_base64 = if img.is_cover || img.index == 0 {
+                    let bytes = read_sub_image(&path, img.data_offset, img.data_length).unwrap_or_default();
+                    base64::engine::general_purpose::STANDARD.encode(&bytes)
+                } else {
+                    String::new() // 延迟加载
+                };
                 SubImagePayload {
                     index: img.index,
                     filename: img.filename.clone(),

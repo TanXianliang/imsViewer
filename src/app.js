@@ -19,6 +19,7 @@ const state = {
   offsetY: 0,
   imgObj: null,
   isFitMode: true,          // 适应窗口模式
+  preloadCancel: null,      // 取消后台加载标志
 };
 
 // ===== DOM 引用 =====
@@ -98,10 +99,24 @@ function base64ToBytes(b64) {
 }
 
 // ===== 图片显示 =====
-function loadCurrentImage() {
+async function loadCurrentImage() {
   if (!state.subImages.length || state.currentSubIdx >= state.subImages.length) return;
-  const sub = state.subImages[state.currentSubIdx];
+  let sub = state.subImages[state.currentSubIdx];
   console.log('加载图片:', sub.filename, 'index:', state.currentSubIdx);
+
+  // 延迟加载：如果当前子图没有数据，从后端获取
+  if (!sub.bytes_base64 && state.imsInfo) {
+    try {
+      sub = await invoke('get_sub_image', {
+        path: state.folderList[state.currentFileIdx].filepath,
+        index: state.currentSubIdx,
+      });
+      state.subImages[state.currentSubIdx] = sub;
+    } catch (err) {
+      console.error('加载子图失败:', err);
+      return;
+    }
+  }
 
   const mime = formatMime(sub.format);
   const rawBytes = base64ToBytes(sub.bytes_base64);
@@ -196,19 +211,27 @@ function buildThumbnails() {
 }
 
 function createThumbItem(sub, index) {
-  const mime = formatMime(sub.format);
-  const rawBytes = base64ToBytes(sub.bytes_base64);
-  const blob = new Blob([rawBytes], { type: mime });
-  const url = URL.createObjectURL(blob);
-
   const div = document.createElement('div');
   div.className = 'thumb-item';
   div.dataset.index = index;
-  div.innerHTML = `
-    <img src="${url}" alt="${sub.filename}" />
-    <span class="thumb-label">${sub.filename}</span>
-    ${sub.isCover ? '<span class="cover-badge">⭐</span>' : ''}
-  `;
+
+  if (sub.bytes_base64) {
+    const mime = formatMime(sub.format);
+    const rawBytes = base64ToBytes(sub.bytes_base64);
+    const blob = new Blob([rawBytes], { type: mime });
+    const url = URL.createObjectURL(blob);
+    div.innerHTML = `
+      <img src="${url}" alt="${sub.filename}" />
+      <span class="thumb-label">${sub.filename}</span>
+      ${sub.isCover ? '<span class="cover-badge">⭐</span>' : ''}
+    `;
+  } else {
+    div.innerHTML = `
+      <div class="thumb-loading"></div>
+      <span class="thumb-label">${sub.filename}</span>
+      ${sub.isCover ? '<span class="cover-badge">⭐</span>' : ''}
+    `;
+  }
   div.addEventListener('click', () => selectSubImage(index));
   return div;
 }
@@ -245,6 +268,9 @@ async function openFile(filepath) {
     buildThumbnails();
     loadCurrentImage();
     updateFileInfo(payload);
+
+    // 后台预加载其余子图
+    startBackgroundPreload();
     updateFolderBar();
     updateStatusBar();
 
@@ -819,6 +845,55 @@ async function registerAssociations() {
   } catch (err) {
     alert('注册失败: ' + err + '\n\n请尝试以管理员身份运行 imsViewer 后重试。');
   }
+}
+
+// ===== 后台预加载 =====
+function startBackgroundPreload() {
+  // 取消之前的任务
+  state.preloadCancel = true;
+
+  const filepath = state.folderList[state.currentFileIdx]?.filepath;
+  if (!filepath || !state.imsInfo) return;
+
+  const cancelToken = {};
+  state.preloadCancel = cancelToken;
+
+  (async () => {
+    for (let i = 0; i < state.subImages.length; i++) {
+      // 检查是否被取消
+      if (state.preloadCancel !== cancelToken) return;
+
+      const sub = state.subImages[i];
+      // 跳过已加载的（封面和已缓存的）
+      if (sub.bytes_base64) continue;
+
+      try {
+        const loaded = await invoke('get_sub_image', { path: filepath, index: i });
+        if (state.preloadCancel !== cancelToken) return;
+
+        // 缓存到 state
+        state.subImages[i] = loaded;
+
+        // 更新缩略图
+        const thumbEl = document.querySelector(`#thumbnail-list .thumb-item[data-index="${i}"]`);
+        if (thumbEl) {
+          const mime = formatMime(loaded.format);
+          const rawBytes = base64ToBytes(loaded.bytes_base64);
+          const blob = new Blob([rawBytes], { type: mime });
+          const url = URL.createObjectURL(blob);
+          const loadingDiv = thumbEl.querySelector('.thumb-loading');
+          if (loadingDiv) {
+            const img = document.createElement('img');
+            img.src = url;
+            img.alt = loaded.filename;
+            loadingDiv.replaceWith(img);
+          }
+        }
+      } catch (e) {
+        console.error('预加载子图失败:', i, e);
+      }
+    }
+  })();
 }
 
 // ===== 启动 =====
