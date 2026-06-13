@@ -547,8 +547,8 @@ function setupMenuActions() {
             '  Home  跳到第一个文件\n' +
             '  End   跳到最后一个文件\n\n' +
             '滚轮:\n' +
-            '  滚轮      切换文件\n' +
-            '  Shift+滚轮 切换子图\n' +
+            '  滚轮      切换子图\n' +
+            '  Shift+滚轮 切换文件\n' +
             '  Ctrl+滚轮  缩放图片\n\n' +
             '缩放:\n' +
             '  + / -  放大 / 缩小\n' +
