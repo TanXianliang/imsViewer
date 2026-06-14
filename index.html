@@ -29,6 +29,12 @@
           <div class="menu-action" data-action="zoom-out">缩小 <span>-</span></div>
         </div>
       </div>
+      <div class="menu-item" id="menu-edit" data-menu="edit" style="display:none">
+        编辑
+        <div class="menu-dropdown">
+          <div class="menu-action" data-action="toggle-edit">进入编辑模式</div>
+        </div>
+      </div>
       <div class="menu-item" data-menu="tools">
         工具
         <div class="menu-dropdown">
@@ -67,6 +73,7 @@
 
       <!-- 中栏：图片显示 -->
       <div id="center-panel">
+        <div id="edit-mode-bar" style="display:none">✏️ 编辑模式</div>
         <canvas id="image-canvas"></canvas>
         <div id="drop-hint">拖放图片文件到此处打开</div>
       </div>
@@ -174,6 +181,14 @@
         <button id="btn-cancel-upgrade" class="btn-secondary">关闭</button>
       </div>
     </div>
+  </div>
+
+  <!-- 缩略图右键菜单（编辑模式） -->
+  <div id="thumb-context-menu" class="context-menu" style="display:none">
+    <div class="context-action" data-action="insert-image">插入图片...</div>
+    <div class="context-action" data-action="replace-image">替换图片...</div>
+    <div class="context-separator"></div>
+    <div class="context-action context-danger" data-action="delete-selected">删除选中</div>
   </div>
 
   <script type="module" src="/src/app.js"></script>

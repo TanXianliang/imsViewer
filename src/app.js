@@ -20,6 +20,10 @@ const state = {
   imgObj: null,
   isFitMode: true,          // 适应窗口模式
   preloadCancel: null,      // 取消后台加载标志
+  editMode: false,          // 编辑模式
+  dirty: false,             // 是否有未保存的修改
+  selectedIndices: new Set(), // 编辑模式下选中的子图索引
+  dragState: null,           // { fromIndex, el } 拖拽排序状态
 };
 
 // ===== DOM 引用 =====
@@ -56,8 +60,10 @@ function init() {
   setupCanvasSize();
   setupKeyboard();
   setupMouse();
-  setupNativeDrop();    // Tauri 原生拖放
+  setupNativeDrop();
   setupMenuActions();
+  setupContextMenu();
+  setupThumbDrag();
   setupFolderBar();
   window.addEventListener('resize', () => {
     setupCanvasSize();
@@ -232,8 +238,165 @@ function createThumbItem(sub, index) {
       ${sub.isCover ? '<span class="cover-badge">⭐</span>' : ''}
     `;
   }
-  div.addEventListener('click', () => selectSubImage(index));
+
+  // 点击：浏览模式切换子图（编辑模式的点击在 mousedown/move/up 中处理）
+  div.addEventListener('click', (e) => {
+    if (!state.editMode) selectSubImage(index);
+  });
+
+  // 右键菜单（仅编辑模式）
+  div.addEventListener('contextmenu', (e) => {
+    if (!state.editMode) return;
+    e.preventDefault();
+    if (!state.selectedIndices.has(index)) {
+      state.selectedIndices.clear();
+      state.selectedIndices.add(index);
+      updateSelectionHighlight();
+    }
+    showContextMenu(e.clientX, e.clientY, index);
+  });
+
   return div;
+}
+
+// ===== 缩略图拖拽 + 编辑模式点击（绑定在 thumbnail-list 上委托） =====
+function setupThumbDrag() {
+  const list = $('#thumbnail-list');
+  let dragIdx = -1, startX = 0, startY = 0, moved = false, clone = null;
+
+  list.addEventListener('mousedown', (e) => {
+    if (!state.editMode || e.button !== 0) return;
+    const thumb = e.target.closest('.thumb-item');
+    if (!thumb) return;
+    dragIdx = parseInt(thumb.dataset.index);
+    if (isNaN(dragIdx) || dragIdx === 0) { dragIdx = -1; return; }
+    startX = e.clientX;
+    startY = e.clientY;
+    moved = false;
+    e.preventDefault();
+  });
+
+  let insertIdx = -1;
+
+  window.addEventListener('mousemove', (e) => {
+    if (dragIdx < 0) return;
+    if (!moved && Math.abs(e.clientX - startX) < 5 && Math.abs(e.clientY - startY) < 5) return;
+    if (!moved) {
+      moved = true;
+      const el = list.querySelector(`.thumb-item[data-index="${dragIdx}"]`);
+      if (!el) { dragIdx = -1; return; }
+      el.classList.add('dragging');
+      clone = el.cloneNode(true);
+      clone.style.cssText = `position:fixed;z-index:9999;pointer-events:none;opacity:0.85;transform:rotate(3deg) scale(1.05);width:${el.offsetWidth}px;`;
+      document.body.appendChild(clone);
+    }
+    clone.style.left = (e.clientX - clone.offsetWidth / 2) + 'px';
+    clone.style.top = (e.clientY - clone.offsetHeight / 2) + 'px';
+    $$('.thumb-item').forEach(el => { el.style.borderTop = ''; el.style.borderBottom = ''; });
+    insertIdx = -1;
+    if (clone) clone.style.display = 'none';
+    const t = document.elementFromPoint(e.clientX, e.clientY)?.closest('.thumb-item');
+    if (clone) clone.style.display = '';
+    if (t) {
+      const ti = parseInt(t.dataset.index);
+      if (!isNaN(ti) && ti !== dragIdx && ti !== 0) {
+        const rect = t.getBoundingClientRect();
+        if (e.clientY < rect.top + rect.height / 2) {
+          t.style.borderTop = '3px solid #2ecc71';
+          insertIdx = ti;
+        } else {
+          t.style.borderBottom = '3px solid #2ecc71';
+          insertIdx = ti + 1;
+        }
+      }
+    }
+    if (insertIdx < 0 && list.children.length > 0) {
+      const last = list.lastElementChild;
+      if (last) {
+        const lr = last.getBoundingClientRect();
+        if (e.clientY > lr.bottom - 5 && e.clientX > lr.left && e.clientX < lr.right) {
+          last.style.borderBottom = '3px solid #2ecc71';
+          insertIdx = state.subImages.length;
+        }
+      }
+    }
+  });
+
+  // 右键取消拖拽
+  window.addEventListener('mousedown', (e) => {
+    if (e.button === 2 && dragIdx >= 0) { cleanupDrag(); }
+  });
+  document.addEventListener('contextmenu', (e) => {
+    if (dragIdx >= 0 || moved) { e.preventDefault(); e.stopPropagation(); }
+  }, true);
+
+  function cleanupDrag() {
+    $$('.thumb-item').forEach(el => { el.classList.remove('dragging'); el.style.borderTop = ''; el.style.borderBottom = ''; });
+    if (clone) { clone.remove(); clone = null; }
+    dragIdx = -1;
+    moved = false;
+    insertIdx = -1;
+  }
+
+  document.addEventListener('mouseleave', cleanupDrag);
+  window.addEventListener('blur', cleanupDrag);
+
+  window.addEventListener('mouseup', (e) => {
+    if (dragIdx < 0) return;
+    if (moved) {
+      if (insertIdx >= 1) {
+        const [mv] = state.subImages.splice(dragIdx, 1);
+        const adjusted = dragIdx < insertIdx ? insertIdx - 1 : insertIdx;
+        state.subImages.splice(adjusted, 0, mv);
+        markDirty();
+        buildThumbnails();
+        updateSelectionHighlight();
+      }
+    } else {
+      // 没有拖拽 = 点击选择
+      if (e.ctrlKey || e.metaKey) {
+        if (state.selectedIndices.has(dragIdx)) state.selectedIndices.delete(dragIdx);
+        else state.selectedIndices.add(dragIdx);
+      } else if (e.shiftKey && state.selectedIndices.size > 0) {
+        const sel = [...state.selectedIndices];
+        const min = Math.min(...sel, dragIdx), max = Math.max(...sel, dragIdx);
+        state.selectedIndices.clear();
+        for (let i = min; i <= max; i++) state.selectedIndices.add(i);
+      } else {
+        state.selectedIndices.clear();
+        state.selectedIndices.add(dragIdx);
+      }
+      updateSelectionHighlight();
+      selectSubImage(dragIdx);
+    }
+    cleanupDrag();
+  });
+}
+
+function handleThumbClick(e, index) {
+  if (e.ctrlKey || e.metaKey) {
+    // Ctrl+点击：切换选中
+    if (state.selectedIndices.has(index)) {
+      state.selectedIndices.delete(index);
+    } else {
+      state.selectedIndices.add(index);
+    }
+  } else if (e.shiftKey && state.selectedIndices.size > 0) {
+    // Shift+点击：范围选中
+    const selected = [...state.selectedIndices];
+    const min = Math.min(...selected, index);
+    const max = Math.max(...selected, index);
+    state.selectedIndices.clear();
+    for (let i = min; i <= max; i++) state.selectedIndices.add(i);
+  } else {
+    // 普通点击：单选
+    state.selectedIndices.clear();
+    state.selectedIndices.add(index);
+  }
+  updateSelectionHighlight();
+  if (state.selectedIndices.size === 1) {
+    selectSubImage(index);
+  }
 }
 
 function highlightThumbnail(index) {
@@ -277,6 +440,11 @@ async function openFile(filepath) {
     const fname = state.folderList[state.currentFileIdx]?.filename ?? filepath;
     document.title = `imsViewer - ${fname}`;
     dom.dropHint.classList.remove('visible');
+
+    // 显示编辑菜单
+    $('#menu-edit').style.display = '';
+    // 文件切换时自动退出编辑模式
+    if (state.editMode) exitEditMode(false);
   } catch (err) {
     console.error('打开文件失败:', err);
     alert('打开文件失败: ' + err);
@@ -284,7 +452,7 @@ async function openFile(filepath) {
 }
 
 async function navigateFile(delta) {
-  if (state.folderList.length === 0) return;
+  if (state.editMode || state.folderList.length === 0) return;
   let newIdx = state.currentFileIdx + delta;
   if (newIdx < 0) newIdx = state.folderList.length - 1;
   if (newIdx >= state.folderList.length) newIdx = 0;
@@ -384,17 +552,23 @@ function setupKeyboard() {
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
 
     switch (e.key) {
-      case 'ArrowLeft':  e.preventDefault(); navigateFile(-1); break;
-      case 'ArrowRight': e.preventDefault(); navigateFile(1);  break;
+      case 'ArrowLeft':  if (!state.editMode) { e.preventDefault(); navigateFile(-1); } break;
+      case 'ArrowRight': if (!state.editMode) { e.preventDefault(); navigateFile(1); }  break;
       case 'ArrowUp':    e.preventDefault(); navigateSub(-1);  break;
       case 'ArrowDown':  e.preventDefault(); navigateSub(1);   break;
-      case 'Home':       e.preventDefault(); navigateFile(-state.currentFileIdx); break;
-      case 'End':        e.preventDefault(); navigateFile(state.folderList.length - 1 - state.currentFileIdx); break;
+      case 'Home':       if (!state.editMode) { e.preventDefault(); navigateFile(-state.currentFileIdx); } break;
+      case 'End':        if (!state.editMode) { e.preventDefault(); navigateFile(state.folderList.length - 1 - state.currentFileIdx); } break;
       case '0':          e.preventDefault(); fitToWindow(); drawImage(); break;
       case '1':          e.preventDefault(); centerOriginal(); drawImage(); break;
       case '+':
       case '=':          e.preventDefault(); zoomAt(1.25, dom.canvas.width / 2, dom.canvas.height / 2); break;
       case '-':          e.preventDefault(); zoomAt(0.8, dom.canvas.width / 2, dom.canvas.height / 2); break;
+      case 'Delete':
+        if (state.editMode) { e.preventDefault(); deleteSelectedImages(); }
+        break;
+      case 'Escape':
+        if (state.editMode) { e.preventDefault(); toggleEditMode(); }
+        break;
       case 'o':
         if (e.ctrlKey) {
           e.preventDefault();
@@ -420,30 +594,13 @@ function setupMouse() {
   let panStartX = 0, panStartY = 0;
   let panOrigOffsetX = 0, panOrigOffsetY = 0;
 
-  dom.canvas.addEventListener('wheel', (e) => {
-    e.preventDefault();
-    if (e.ctrlKey || e.metaKey) {
-      // Ctrl+滚轮：以鼠标位置为中心缩放
-      const rect = dom.canvas.getBoundingClientRect();
-      const factor = e.deltaY < 0 ? 1.15 : 0.87;
-      zoomAt(factor, e.clientX - rect.left, e.clientY - rect.top);
-    } else if (e.shiftKey) {
-      // Shift+滚轮：切换文件
-      navigateFile(e.deltaY > 0 ? 1 : -1);
-    } else {
-      // 直接滚轮：切换子图
-      navigateSub(e.deltaY > 0 ? 1 : -1);
-    }
-  });
-
   dom.canvas.addEventListener('mousedown', (e) => {
-    if (e.button === 0) {
-      isPanning = true;
-      panStartX = e.clientX;
-      panStartY = e.clientY;
-      panOrigOffsetX = state.offsetX;
-      panOrigOffsetY = state.offsetY;
-    }
+    if (e.button !== 0) return;
+    isPanning = true;
+    panStartX = e.clientX;
+    panStartY = e.clientY;
+    panOrigOffsetX = state.offsetX;
+    panOrigOffsetY = state.offsetY;
   });
 
   window.addEventListener('mousemove', (e) => {
@@ -455,6 +612,22 @@ function setupMouse() {
   });
 
   window.addEventListener('mouseup', () => { isPanning = false; });
+
+  dom.canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    if (e.ctrlKey || e.metaKey) {
+      // Ctrl+滚轮：以鼠标位置为中心缩放
+      const rect = dom.canvas.getBoundingClientRect();
+      const factor = e.deltaY < 0 ? 1.15 : 0.87;
+      zoomAt(factor, e.clientX - rect.left, e.clientY - rect.top);
+    } else if (e.shiftKey) {
+      // Shift+滚轮：切换文件（编辑模式下锁定）
+      if (!state.editMode) navigateFile(e.deltaY > 0 ? 1 : -1);
+    } else {
+      // 直接滚轮：切换子图
+      navigateSub(e.deltaY > 0 ? 1 : -1);
+    }
+  });
 
   dom.canvas.addEventListener('dblclick', () => {
     if (state.scale < 0.99) {
@@ -484,9 +657,12 @@ async function setupNativeDrop() {
       } else if (type === 'drop') {
         dom.dropHint.classList.remove('visible');
         if (paths && paths.length > 0) {
-          const filepath = paths[0];
-          console.log('拖放文件:', filepath);
-          openFile(filepath);
+          if (state.editMode) {
+            // 编辑模式：插入到缩略图列表末尾
+            insertImageFiles(paths);
+          } else {
+            openFile(paths[0]);
+          }
         }
       }
     });
@@ -563,6 +739,9 @@ function setupMenuActions() {
           break;
         case 'register-assoc':
           registerAssociations();
+          break;
+        case 'toggle-edit':
+          toggleEditMode();
           break;
         case 'help-shortcuts':
           alert(
@@ -845,6 +1024,201 @@ async function registerAssociations() {
   } catch (err) {
     alert('注册失败: ' + err + '\n\n请尝试以管理员身份运行 imsViewer 后重试。');
   }
+}
+
+// ===== 编辑模式 =====
+function toggleEditMode() {
+  if (state.editMode) {
+    exitEditMode(true);
+  } else {
+    enterEditMode();
+  }
+}
+
+function enterEditMode() {
+  state.editMode = true;
+  state.dirty = false;
+  $('#edit-mode-bar').style.display = '';
+  const btn = document.querySelector('#menu-edit .menu-action[data-action=\"toggle-edit\"]');
+  if (btn) btn.textContent = '退出编辑模式';
+  state.currentSubIdx = 0;
+  selectSubImage(0);
+}
+
+function markDirty() { state.dirty = true; }
+
+function updateSelectionHighlight() {
+  $$('.thumb-item').forEach((el, i) => {
+    el.classList.toggle('selected', state.selectedIndices.has(i));
+  });
+}
+
+// 右键菜单
+function showContextMenu(x, y, index) {
+  const menu = $('#thumb-context-menu');
+  menu.style.display = '';
+  // 视口边界裁剪
+  const mw = menu.offsetWidth || 160;
+  const mh = menu.offsetHeight || 120;
+  if (x + mw > window.innerWidth) x = window.innerWidth - mw - 4;
+  if (y + mh > window.innerHeight) y = window.innerHeight - mh - 4;
+  menu.style.left = Math.max(0, x) + 'px';
+  menu.style.top = Math.max(0, y) + 'px';
+
+  // 根据是否选中封面调整可用操作
+  const hasCover = state.selectedIndices.has(0);
+  const delBtn = menu.querySelector('[data-action="delete-selected"]');
+  if (delBtn) {
+    delBtn.style.display = hasCover && state.selectedIndices.size === 1 ? 'none' : '';
+    // 若选中集中含封面，标注封面不会被删
+    if (hasCover && state.selectedIndices.size > 1) {
+      delBtn.textContent = `删除选中 (${state.selectedIndices.size - 1}张, 封面除外)`;
+    } else {
+      delBtn.textContent = '删除选中';
+    }
+  }
+}
+
+function setupContextMenu() {
+  $$('#thumb-context-menu .context-action').forEach(el => {
+    el.addEventListener('click', () => handleContextAction(el.dataset.action));
+  });
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('#thumb-context-menu')) hideContextMenu();
+  });
+}
+
+function hideContextMenu() {
+  $('#thumb-context-menu').style.display = 'none';
+}
+
+// 上下文菜单操作
+async function handleContextAction(action) {
+  hideContextMenu();
+  switch (action) {
+    case 'delete-selected':
+      deleteSelectedImages();
+      break;
+    case 'replace-image':
+      await replaceSelectedImage();
+      break;
+    case 'insert-image':
+      await insertImages();
+      break;
+  }
+}
+
+// 删除选中子图
+function deleteSelectedImages() {
+  if (!state.editMode) return;
+  const toDelete = [...state.selectedIndices].filter(i => i !== 0); // 封面除外
+  if (toDelete.length === 0) return;
+
+  // 从后往前删，避免索引错乱
+  toDelete.sort((a, b) => b - a);
+  for (const idx of toDelete) {
+    state.subImages.splice(idx, 1);
+  }
+  state.selectedIndices.clear();
+  markDirty();
+  buildThumbnails();
+  if (state.currentSubIdx >= state.subImages.length) {
+    state.currentSubIdx = state.subImages.length - 1;
+  }
+  loadCurrentImage();
+}
+
+// 替换选中图片
+async function replaceSelectedImage() {
+  if (!state.editMode || state.selectedIndices.size !== 1) return;
+  const idx = [...state.selectedIndices][0];
+  try {
+    const path = await invoke('pick_file');
+    if (!path) return;
+    const payload = await invoke('open_file', { path });
+    if (payload.sub_images.length > 0) {
+      const newSub = payload.sub_images[0];
+      if (idx === 0) newSub.isCover = true; // 保持封面标记
+      state.subImages[idx] = newSub;
+      markDirty();
+      buildThumbnails();
+      updateSelectionHighlight();
+      if (idx === state.currentSubIdx) loadCurrentImage();
+    }
+  } catch (e) {
+    console.error('替换失败:', e);
+  }
+}
+
+// 从文件路径列表批量插入图片
+async function insertImageFiles(filepaths) {
+  if (!state.editMode) return;
+  for (const fp of filepaths) {
+    try {
+      const payload = await invoke('open_file', { path: fp });
+      if (payload.sub_images.length > 0) {
+        for (const sub of payload.sub_images) {
+          sub.isCover = false;
+          // IMS 子图延迟加载 → 主动加载缺失数据
+          if (!sub.bytes_base64 && payload.ims_info) {
+            try {
+              const loaded = await invoke('get_sub_image', { path: fp, index: sub.index });
+              sub.bytes_base64 = loaded.bytes_base64;
+              sub.format = loaded.format;
+            } catch (e) { console.error('加载子图失败:', sub.filename, e); }
+          }
+        }
+        state.subImages.push(...payload.sub_images);
+        markDirty();
+      }
+    } catch (e) { console.error('插入失败:', fp, e); }
+  }
+  buildThumbnails();
+  updateSelectionHighlight();
+}
+
+// 插入图片（文件对话框）
+async function insertImages() {
+  if (!state.editMode) return;
+  try {
+    const path = await invoke('pick_file');
+    if (!path) return;
+    const payload = await invoke('open_file', { path });
+    if (payload.sub_images.length > 0) {
+      const insertAt = state.selectedIndices.size === 1
+        ? Math.max(1, [...state.selectedIndices][0] + 1) // 封面后，选中项之后
+        : state.subImages.length;
+      for (const sub of payload.sub_images) {
+        sub.isCover = false;
+        if (!sub.bytes_base64 && payload.ims_info) {
+          try {
+            const loaded = await invoke('get_sub_image', { path, index: sub.index });
+            sub.bytes_base64 = loaded.bytes_base64;
+            sub.format = loaded.format;
+          } catch (e) { console.error('加载子图失败:', sub.filename, e); }
+        }
+      }
+      state.subImages.splice(insertAt, 0, ...payload.sub_images);
+      markDirty();
+      buildThumbnails();
+      updateSelectionHighlight();
+    }
+  } catch (e) {
+    console.error('插入失败:', e);
+  }
+}
+
+function exitEditMode(confirmIfDirty) {
+  if (confirmIfDirty && state.dirty) {
+    if (!confirm('有未保存的修改，确定退出编辑模式吗？')) return;
+  }
+  state.editMode = false;
+  state.dirty = false;
+  state.selectedIndices.clear();
+  $$('.thumb-item').forEach(el => el.classList.remove('selected'));
+  $('#edit-mode-bar').style.display = 'none';
+  const btn = document.querySelector('#menu-edit .menu-action[data-action=\"toggle-edit\"]');
+  if (btn) btn.textContent = '进入编辑模式';
 }
 
 // ===== 后台预加载 =====
