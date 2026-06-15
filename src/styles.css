@@ -51,7 +51,18 @@ body {
 }
 .title-bar-spacer {
   flex: 1;
+  display: flex;
+  align-items: center;
   margin-left: 4px;
+  overflow: hidden;
+}
+#title-filename {
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding-left: 4px;
 }
 .window-controls {
   display: flex;

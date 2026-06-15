@@ -54,6 +54,7 @@ const dom = {
   statusFilePos: $('#status-file-pos'),
   statusSubPos: $('#status-sub-pos'),
   statusZoom: $('#status-zoom'),
+  titleFilename: $('#title-filename'),
 };
 
 // ===== 初始化 =====
@@ -445,6 +446,7 @@ async function openFile(filepath) {
 
     const fname = state.folderList[state.currentFileIdx]?.filename ?? filepath;
     document.title = `imsViewer - ${fname}`;
+    updateTitleFilename(fname);
     dom.dropHint.classList.remove('visible');
 
     // 显示编辑菜单
@@ -538,6 +540,10 @@ function toggleImsRows(visible) {
 
 function setStatus(msg) {
   dom.statusSubPos.textContent = msg;
+}
+
+function updateTitleFilename(fname) {
+  dom.titleFilename.textContent = fname || '';
 }
 
 function updateStatusBar() {
