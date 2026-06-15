@@ -9,11 +9,9 @@
 <body>
   <div id="app">
     <!-- 自定义标题栏 -->
-    <div id="title-bar">
-      <div class="title-bar-drag" onmousedown="window.__imsViewer.beginDrag()">
-        <span class="title-bar-icon"></span>
-        <span class="title-bar-title">imsViewer</span>
-      </div>
+    <div id="title-bar" data-tauri-drag-region>
+      <span class="title-bar-icon"></span>
+      <span class="title-bar-title">imsViewer</span>
       <!-- 菜单栏 -->
       <div id="menu-bar">
         <div class="menu-item" data-menu="file">
@@ -66,8 +64,8 @@
           </div>
         </div>
       </div>
-      <!-- 拖拽占位区 -->
-      <div class="title-bar-drag title-bar-spacer" onmousedown="window.__imsViewer.beginDrag()"></div>
+      <!-- 拖拽占位 -->
+      <div class="title-bar-spacer"></div>
       <!-- 窗口控制按钮 -->
       <div class="window-controls">
         <button onclick="window.__imsViewer.minimize()" title="最小化">─</button>

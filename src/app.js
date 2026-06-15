@@ -735,14 +735,13 @@ function setupHtml5Drop() {
   });
 }
 
-// ===== 窗口控制（全局引用，供 HTML onclick/onmousedown 调用） =====
+// ===== 窗口控制（全局引用，供 HTML onclick 调用） =====
 function setupWindowControls() {
   const win = getCurrentWindow();
   window.__imsViewer = {
     minimize: () => win.minimize(),
     maximize: () => win.toggleMaximize(),
     close: () => win.close(),
-    beginDrag: () => win.startDragging(),
   };
 }
 

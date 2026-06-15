@@ -43,22 +43,18 @@ body {
   z-index: 100;
   flex-shrink: 0;
 }
-.title-bar-drag {
-  display: flex;
-  align-items: center;
-  height: 30px;
-  flex-shrink: 0;
-}
 .title-bar-icon {
   display: inline-block;
   width: 16px;
   height: 16px;
   margin: 0 6px 0 10px;
   background: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="1" fill="none" stroke="%23888" stroke-width="1"/><circle cx="5" cy="7" r="1.5" fill="%23888"/><path d="M3 11l2-2 1.5 1.5 3-3 2.5 2.5V12H3z" fill="%23888"/></svg>') center/14px no-repeat;
+  flex-shrink: 0;
 }
 .title-bar-title {
   font-size: 11px;
   color: var(--text-secondary);
+  flex-shrink: 0;
 }
 .title-bar-spacer {
   flex: 1;
