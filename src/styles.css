@@ -526,3 +526,62 @@ body {
   font-size: 11px;
   white-space: nowrap;
 }
+
+/* ===== 保存确认对话框 ===== */
+.save-confirm-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+}
+.save-confirm-box {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 24px 32px;
+  min-width: 320px;
+  text-align: center;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+}
+.save-confirm-box p {
+  margin: 0 0 20px 0;
+  font-size: 14px;
+  color: var(--text-primary);
+}
+.save-confirm-btns {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+}
+.save-confirm-btns button {
+  padding: 6px 18px;
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+  border: 1px solid var(--border);
+}
+.save-confirm-btns .btn-save {
+  background: #2e86de;
+  color: #fff;
+  border-color: #2e86de;
+}
+.save-confirm-btns .btn-save:hover {
+  background: #2472c4;
+}
+.save-confirm-btns .btn-discard {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+}
+.save-confirm-btns .btn-discard:hover {
+  background: var(--bg-hover);
+}
+.save-confirm-btns .btn-cancel {
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+}
+.save-confirm-btns .btn-cancel:hover {
+  background: var(--bg-hover);
+}

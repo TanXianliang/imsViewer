@@ -1432,9 +1432,43 @@ async function saveFile() {
   }
 }
 
-function exitEditMode(confirmIfDirty) {
+// 退出确认对话框（保存 / 不保存 / 取消）
+function showSaveConfirm() {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'save-confirm-overlay';
+    overlay.innerHTML = `
+      <div class="save-confirm-box">
+        <p>有未保存的修改，是否保存？</p>
+        <div class="save-confirm-btns">
+          <button class="btn-save">保存</button>
+          <button class="btn-discard">不保存</button>
+          <button class="btn-cancel">取消</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+
+    const cleanup = () => overlay.remove();
+
+    overlay.querySelector('.btn-save').addEventListener('click', () => { cleanup(); resolve('save'); });
+    overlay.querySelector('.btn-discard').addEventListener('click', () => { cleanup(); resolve('discard'); });
+    overlay.querySelector('.btn-cancel').addEventListener('click', () => { cleanup(); resolve('cancel'); });
+    // 点击遮罩背景 = 取消
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) { cleanup(); resolve('cancel'); } });
+  });
+}
+
+async function exitEditMode(confirmIfDirty) {
   if (confirmIfDirty && state.dirty) {
-    if (!confirm('有未保存的修改，确定退出编辑模式吗？')) return;
+    const choice = await showSaveConfirm();
+    if (choice === 'save') {
+      await saveFile();
+      // saveFile 对 IMS 保持编辑模式，需额外退出；非 IMS 已通过 openFile 退出
+      if (!state.editMode) return;
+    } else if (choice === 'cancel') {
+      return;
+    }
+    // 'discard' → 直接退出不保存
   }
   state.editMode = false;
   state.dirty = false;
