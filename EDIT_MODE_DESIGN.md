@@ -121,10 +121,11 @@ MoveCommand:   { fromIndices, toIndex }
 - 拖拽排序（单选，封面锁定）
 - IMS 文件插入（提取**全部**子图，非仅封面 — 与设计初期决策不同）
 
-**Phase 4 — Undo/Redo** ❌ 未实现
-- 命令模式实现
-- Ctrl+Z / Ctrl+Y
-- 栈深度限制
+**Phase 4 — Undo/Redo** ✅ 已实现
+- 命令模式实现（EditCommand / DeleteCommand / ReplaceCommand / InsertCommand / MoveCommand）
+- Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z
+- 栈深度限制 30 步
+- dirty 标志联动（全部撤销后自动清零）
 
 **Phase 5 — 保存** ❌ 未实现
 - `save_ims` Rust 命令
@@ -175,7 +176,7 @@ MoveCommand:   { fromIndices, toIndex }
 
 ## 实现现状
 
-Phase 1-3 已全部实现，代码位于 `src/app.js`（未拆分独立 `edit.js`），约 300 行编辑相关代码。Phase 4-5（Undo/Redo + 保存）尚未实现。
+Phase 1-4 已全部实现，代码位于 `src/app.js`（未拆分独立 `edit.js`），编辑模式约 420 行，Undo/Redo 约 120 行。Phase 5（保存到文件）尚未实现。
 
 ### 与设计方案的主要差异
 
@@ -183,8 +184,9 @@ Phase 1-3 已全部实现，代码位于 `src/app.js`（未拆分独立 `edit.js
 |------|-------------|---------|
 | IMS 源插入 | 只提取封面 | 提取**全部**子图 |
 | 代码拆分 | 新建 `src/edit.js` | 全部写入 `src/app.js` |
+| Undo/Redo | 独立编辑文件 | 纯 JS 实现，集成在 `src/app.js`，未新增 Rust 命令 |
 | 文件结构 | 需要 `save_ims` Rust 命令 | 未新增任何 Rust 命令（保存未实现） |
 
 ## 总结
 
-整体方案可行，8 个需求中有 6 个可以直接实现，拖拽排序和 Undo/Redo 复杂度较高但可控。Phases 1-3 已按序完成，Phase 4-5 待后续迭代。
+整体方案可行，8 个需求已全部实现，Undo/Redo 已完成，Phase 5（保存到文件）待后续迭代。

@@ -720,7 +720,7 @@ listen("batch-progress")  ←
 | Phase 1 | 基础编辑框架（菜单、切换、导航锁、脏状态） | 已完成 |
 | Phase 2 | 核心编辑操作（多选、删除、替换、封面保护、右键菜单） | 已完成 |
 | Phase 3 | 插入 + 排序（文件对话框、拖放、拖拽排序、IMS 提取） | 已完成 |
-| Phase 4 | Undo/Redo（命令模式、Ctrl+Z/Y、栈深度限制） | 未实现 |
+| Phase 4 | Undo/Redo（命令模式、Ctrl+Z/Y、栈深度限制 30 步） | ✅ 已完成 |
 | Phase 5 | 保存（save_ims Rust 命令、写回文件） | 未实现 |
 
 ### 17.2 入口与状态管理
