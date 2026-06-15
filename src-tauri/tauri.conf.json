@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/nicehash/tauri/dev/crates/tauri-config-schema/schema.json",
   "productName": "imsViewer",
   "version": "1.0.0",
-  "identifier": "com.imsviewer.app",
+  "identifier": "com.imsviewer.desktop",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
@@ -37,12 +37,12 @@
       {
         "ext": ["jpg", "jpeg", "png", "webp", "avif"],
         "name": "Image",
-        "description": "图片文件"
+        "description": "Image File"
       },
       {
         "ext": ["ims.jpg", "ims.png"],
         "name": "IMS Container",
-        "description": "IMS 容器文件"
+        "description": "IMS Container File"
       }
     ]
   }

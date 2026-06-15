@@ -24,6 +24,8 @@ const state = {
   dirty: false,             // 是否有未保存的修改
   selectedIndices: new Set(), // 编辑模式下选中的子图索引
   dragState: null,           // { fromIndex, el } 拖拽排序状态
+  undoStack: [],             // EditCommand[] 撤销栈
+  redoStack: [],             // EditCommand[] 重做栈
 };
 
 // ===== DOM 引用 =====
@@ -86,6 +88,8 @@ function setupCanvasSize() {
   dom.canvas.style.width = cw + 'px';
   dom.canvas.style.height = ch + 'px';
 }
+
+const MAX_UNDO_DEPTH = 30;
 
 // ===== 格式映射 =====
 const FORMAT_MIME = ['image/jpeg', 'image/png', 'image/webp', 'image/avif'];
@@ -269,7 +273,7 @@ function setupThumbDrag() {
     const thumb = e.target.closest('.thumb-item');
     if (!thumb) return;
     dragIdx = parseInt(thumb.dataset.index);
-    if (isNaN(dragIdx) || dragIdx === 0) { dragIdx = -1; return; }
+    if (isNaN(dragIdx)) { dragIdx = -1; return; }
     startX = e.clientX;
     startY = e.clientY;
     moved = false;
@@ -344,11 +348,12 @@ function setupThumbDrag() {
   window.addEventListener('mouseup', (e) => {
     if (dragIdx < 0) return;
     if (moved) {
-      if (insertIdx >= 1) {
-        const [mv] = state.subImages.splice(dragIdx, 1);
-        const adjusted = dragIdx < insertIdx ? insertIdx - 1 : insertIdx;
-        state.subImages.splice(adjusted, 0, mv);
-        markDirty();
+      // 封面不可拖拽移动
+      if (insertIdx >= 1 && dragIdx !== 0) {
+        const toIndex = dragIdx < insertIdx ? insertIdx - 1 : insertIdx;
+        const cmd = new MoveCommand(dragIdx, toIndex);
+        cmd.execute(state);
+        pushCommand(cmd);
         buildThumbnails();
         updateSelectionHighlight();
       }
@@ -568,6 +573,23 @@ function setupKeyboard() {
         break;
       case 'Escape':
         if (state.editMode) { e.preventDefault(); toggleEditMode(); }
+        break;
+      case 'z':
+      case 'Z':
+        if (e.ctrlKey && e.shiftKey && state.editMode) {
+          e.preventDefault();
+          redo();  // Ctrl+Shift+Z = 重做
+        } else if (e.ctrlKey && !e.shiftKey && state.editMode) {
+          e.preventDefault();
+          undo();  // Ctrl+Z = 撤销
+        }
+        break;
+      case 'y':
+      case 'Y':
+        if (e.ctrlKey && state.editMode) {
+          e.preventDefault();
+          redo();  // Ctrl+Y = 重做
+        }
         break;
       case 'o':
         if (e.ctrlKey) {
@@ -1026,6 +1048,127 @@ async function registerAssociations() {
   }
 }
 
+// ===== Undo/Redo 命令模式 =====
+class EditCommand {
+  execute(state) {}  // 正向执行/重做
+  undo(state) {}     // 撤销
+}
+
+// 删除命令：按降序存储索引和对应图片数据
+class DeleteCommand extends EditCommand {
+  constructor(indices, images) {
+    super();
+    // indices 已是降序，images 是对应的 SubImagePayload
+    this.items = indices.map((idx, i) => ({ index: idx, image: images[i] }));
+  }
+
+  execute(state) {
+    for (const { index } of this.items) {
+      state.subImages.splice(index, 1);
+    }
+  }
+
+  undo(state) {
+    // 升序插回，恢复原始位置
+    const ascending = [...this.items].sort((a, b) => a.index - b.index);
+    for (const { index, image } of ascending) {
+      state.subImages.splice(index, 0, image);
+    }
+  }
+}
+
+// 替换命令
+class ReplaceCommand extends EditCommand {
+  constructor(index, oldImage, newImage) {
+    super();
+    this.index = index;
+    this.oldImage = oldImage;
+    this.newImage = newImage;
+  }
+
+  execute(state) {
+    state.subImages[this.index] = this.newImage;
+  }
+
+  undo(state) {
+    state.subImages[this.index] = this.oldImage;
+  }
+}
+
+// 插入命令
+class InsertCommand extends EditCommand {
+  constructor(insertAt, images) {
+    super();
+    this.insertAt = insertAt;
+    this.images = images;
+  }
+
+  execute(state) {
+    state.subImages.splice(this.insertAt, 0, ...this.images);
+  }
+
+  undo(state) {
+    state.subImages.splice(this.insertAt, this.images.length);
+  }
+}
+
+// 移动命令（拖拽排序）
+class MoveCommand extends EditCommand {
+  constructor(fromIndex, toIndex) {
+    super();
+    this.fromIndex = fromIndex;
+    this.toIndex = toIndex;
+  }
+
+  execute(state) {
+    const [item] = state.subImages.splice(this.fromIndex, 1);
+    state.subImages.splice(this.toIndex, 0, item);
+  }
+
+  undo(state) {
+    const [item] = state.subImages.splice(this.toIndex, 1);
+    state.subImages.splice(this.fromIndex, 0, item);
+  }
+}
+
+// ===== Undo/Redo 栈管理 =====
+function pushCommand(cmd) {
+  state.redoStack = [];  // 新编辑清空重做栈
+  state.undoStack.push(cmd);
+  if (state.undoStack.length > MAX_UNDO_DEPTH) {
+    state.undoStack.shift();  // 淘汰最旧命令
+  }
+  state.dirty = state.undoStack.length > 0;
+}
+
+function undo() {
+  if (!state.editMode || state.undoStack.length === 0) return;
+  const cmd = state.undoStack.pop();
+  cmd.undo(state);
+  state.redoStack.push(cmd);
+  state.dirty = state.undoStack.length > 0;
+  refreshAfterCommand();
+}
+
+function redo() {
+  if (!state.editMode || state.redoStack.length === 0) return;
+  const cmd = state.redoStack.pop();
+  cmd.execute(state);
+  state.undoStack.push(cmd);
+  state.dirty = state.undoStack.length > 0;
+  refreshAfterCommand();
+}
+
+function refreshAfterCommand() {
+  state.selectedIndices.clear();
+  buildThumbnails();
+  updateSelectionHighlight();
+  if (state.currentSubIdx >= state.subImages.length) {
+    state.currentSubIdx = Math.max(0, state.subImages.length - 1);
+  }
+  loadCurrentImage();
+}
+
 // ===== 编辑模式 =====
 function toggleEditMode() {
   if (state.editMode) {
@@ -1038,6 +1181,8 @@ function toggleEditMode() {
 function enterEditMode() {
   state.editMode = true;
   state.dirty = false;
+  state.undoStack = [];
+  state.redoStack = [];
   $('#edit-mode-bar').style.display = '';
   const btn = document.querySelector('#menu-edit .menu-action[data-action=\"toggle-edit\"]');
   if (btn) btn.textContent = '退出编辑模式';
@@ -1116,11 +1261,11 @@ function deleteSelectedImages() {
 
   // 从后往前删，避免索引错乱
   toDelete.sort((a, b) => b - a);
-  for (const idx of toDelete) {
-    state.subImages.splice(idx, 1);
-  }
+  const removedImages = toDelete.map(i => state.subImages[i]);
+  const cmd = new DeleteCommand(toDelete, removedImages);
+  cmd.execute(state);
+  pushCommand(cmd);
   state.selectedIndices.clear();
-  markDirty();
   buildThumbnails();
   if (state.currentSubIdx >= state.subImages.length) {
     state.currentSubIdx = state.subImages.length - 1;
@@ -1137,10 +1282,12 @@ async function replaceSelectedImage() {
     if (!path) return;
     const payload = await invoke('open_file', { path });
     if (payload.sub_images.length > 0) {
+      const oldSub = state.subImages[idx];  // 捕获旧数据供撤销
       const newSub = payload.sub_images[0];
       if (idx === 0) newSub.isCover = true; // 保持封面标记
-      state.subImages[idx] = newSub;
-      markDirty();
+      const cmd = new ReplaceCommand(idx, oldSub, newSub);
+      cmd.execute(state);
+      pushCommand(cmd);
       buildThumbnails();
       updateSelectionHighlight();
       if (idx === state.currentSubIdx) loadCurrentImage();
@@ -1153,6 +1300,8 @@ async function replaceSelectedImage() {
 // 从文件路径列表批量插入图片
 async function insertImageFiles(filepaths) {
   if (!state.editMode) return;
+  const insertAt = state.subImages.length;
+  const allImages = [];
   for (const fp of filepaths) {
     try {
       const payload = await invoke('open_file', { path: fp });
@@ -1168,10 +1317,14 @@ async function insertImageFiles(filepaths) {
             } catch (e) { console.error('加载子图失败:', sub.filename, e); }
           }
         }
-        state.subImages.push(...payload.sub_images);
-        markDirty();
+        allImages.push(...payload.sub_images);
       }
     } catch (e) { console.error('插入失败:', fp, e); }
+  }
+  if (allImages.length > 0) {
+    const cmd = new InsertCommand(insertAt, allImages);
+    cmd.execute(state);
+    pushCommand(cmd);
   }
   buildThumbnails();
   updateSelectionHighlight();
@@ -1198,8 +1351,9 @@ async function insertImages() {
           } catch (e) { console.error('加载子图失败:', sub.filename, e); }
         }
       }
-      state.subImages.splice(insertAt, 0, ...payload.sub_images);
-      markDirty();
+      const cmd = new InsertCommand(insertAt, payload.sub_images);
+      cmd.execute(state);
+      pushCommand(cmd);
       buildThumbnails();
       updateSelectionHighlight();
     }
@@ -1214,6 +1368,8 @@ function exitEditMode(confirmIfDirty) {
   }
   state.editMode = false;
   state.dirty = false;
+  state.undoStack = [];
+  state.redoStack = [];
   state.selectedIndices.clear();
   $$('.thumb-item').forEach(el => el.classList.remove('selected'));
   $('#edit-mode-bar').style.display = 'none';
