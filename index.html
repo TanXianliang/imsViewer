@@ -9,7 +9,7 @@
 <body>
   <div id="app">
     <!-- 自定义标题栏 -->
-    <div id="title-bar" data-tauri-drag-region>
+    <div id="title-bar" data-tauri-drag-region onmousedown="window.__imsViewer.onTitleBarMouseDown(event)">
       <img class="title-bar-icon" src="/icon.png" alt="" />
       <!-- 菜单栏 -->
       <div id="menu-bar">

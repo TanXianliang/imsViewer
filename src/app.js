@@ -761,6 +761,14 @@ async function setupWindowControls() {
       updateMaxIcon();
     },
     close: () => win.close(),
+    onTitleBarMouseDown: (e) => {
+      // 排除按钮、菜单项、下拉框
+      if (e.target.closest('button') || e.target.closest('.menu-item') ||
+          e.target.closest('.menu-dropdown') || e.target.closest('.menu-action')) {
+        return;
+      }
+      win.startDragging();
+    },
   };
 
   // 初始状态 + 监听窗口变化
