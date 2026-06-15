@@ -766,14 +766,6 @@ async function setupWindowControls() {
   // 初始状态 + 监听窗口变化
   updateMaxIcon();
   win.onResized(updateMaxIcon);
-
-  // 窗口焦点变化 → 标题栏明暗切换
-  document.addEventListener('focusin', () => document.body.classList.remove('window-unfocused'));
-  document.addEventListener('focusout', () => document.body.classList.add('window-unfocused'));
-
-  // 初始焦点状态
-  const focused = await win.isFocused();
-  document.body.classList.toggle('window-unfocused', !focused);
 }
 
 // ===== 菜单栏 =====
