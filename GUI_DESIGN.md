@@ -721,7 +721,7 @@ listen("batch-progress")  ←
 | Phase 2 | 核心编辑操作（多选、删除、替换、封面保护、右键菜单） | 已完成 |
 | Phase 3 | 插入 + 排序（文件对话框、拖放、拖拽排序、IMS 提取） | 已完成 |
 | Phase 4 | Undo/Redo（命令模式、Ctrl+Z/Y、栈深度限制 30 步） | ✅ 已完成 |
-| Phase 5 | 保存（save_ims Rust 命令、写回文件） | 未实现 |
+| Phase 5 | 保存（save_ims Rust 命令、原子写入、Ctrl+S） | ✅ 已完成 |
 
 ### 17.2 入口与状态管理
 
@@ -775,4 +775,4 @@ listen("batch-progress")  ←
 
 - 所有编辑逻辑位于 `src/app.js`（未拆分独立 `edit.js`），约 300 行编辑相关代码
 - 编辑状态集中管理在 `state` 对象：`editMode`、`dirty`、`selectedIndices`（Set）、`dragState`
-- 未新增 Rust 命令（保存功能尚未实现，插入/替换复用现有 `open_file` / `pick_file` / `get_sub_image`）
+- 新增 Rust 命令：`save_ims`（原子写入，WebP/AVIF 自动转 PNG，仅剩封面时存为普通图片）

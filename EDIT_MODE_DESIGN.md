@@ -127,9 +127,12 @@ MoveCommand:   { fromIndices, toIndex }
 - 栈深度限制 30 步
 - dirty 标志联动（全部撤销后自动清零）
 
-**Phase 5 — 保存** ❌ 未实现
-- `save_ims` Rust 命令
-- 写入文件 + 刷新视图
+**Phase 5 — 保存** ✅ 已实现
+- `save_ims` Rust 命令（原子写入：先写 `.tmp`，成功后再替换原文件）
+- `Ctrl+S` 快捷键
+- 仅剩封面时自动存为普通图片
+- WebP/AVIF 自动转 PNG
+- 保存成功后刷新文件元数据、清除 dirty 和 undo/redo 栈
 
 ### 新增文件
 | 文件 | 内容 |
@@ -176,7 +179,7 @@ MoveCommand:   { fromIndices, toIndex }
 
 ## 实现现状
 
-Phase 1-4 已全部实现，代码位于 `src/app.js`（未拆分独立 `edit.js`），编辑模式约 420 行，Undo/Redo 约 120 行。Phase 5（保存到文件）尚未实现。
+Phase 1-5 全部完成，代码位于 `src/app.js`（编辑模式约 450 行，Undo/Redo 约 120 行，保存约 30 行）。Rust 端新增 `save_ims` 命令（lib.rs 约 60 行）及 `save_ims_entries_atomic`（ims_pack.rs 约 40 行）。
 
 ### 与设计方案的主要差异
 
@@ -185,8 +188,8 @@ Phase 1-4 已全部实现，代码位于 `src/app.js`（未拆分独立 `edit.js
 | IMS 源插入 | 只提取封面 | 提取**全部**子图 |
 | 代码拆分 | 新建 `src/edit.js` | 全部写入 `src/app.js` |
 | Undo/Redo | 独立编辑文件 | 纯 JS 实现，集成在 `src/app.js`，未新增 Rust 命令 |
-| 文件结构 | 需要 `save_ims` Rust 命令 | 未新增任何 Rust 命令（保存未实现） |
+| 文件结构 | 需要 `save_ims` Rust 命令 | 已新增 `save_ims` + `save_ims_entries_atomic`（原子写入） |
 
 ## 总结
 
-整体方案可行，8 个需求已全部实现，Undo/Redo 已完成，Phase 5（保存到文件）待后续迭代。
+整体方案完成，8 个需求全部实现。编辑模式功能闭环：进入 → 增删改排序 → 撤销/重做 → 保存 → 退出。
