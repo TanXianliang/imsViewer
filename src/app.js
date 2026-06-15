@@ -1437,6 +1437,8 @@ async function saveFile() {
         state.currentSubIdx = Math.max(0, state.subImages.length - 1);
       }
       loadCurrentImage();
+      // 重新触发后台预加载，填充非封面子图缩略图
+      startBackgroundPreload();
     } else {
       // 非 IMS → IMS：用 openFile 完整刷新（更新文件列表、导航到新文件、退出编辑模式）
       await openFile(savePath);
