@@ -179,9 +179,17 @@ MoveCommand:   { fromIndices, toIndex }
 
 ## 实现现状
 
-Phase 1-5 全部完成，代码位于 `src/app.js`（编辑模式约 480 行，Undo/Redo 约 120 行，保存约 50 行）。Rust 端新增 `save_ims` 命令（lib.rs 约 60 行）及 `save_ims_entries_atomic`（ims_pack.rs 约 40 行）。
+Phase 1-5 全部完成，所有编辑功能闭环可用。代码位于 `src/app.js`（编辑模式约 550 行，Undo/Redo 约 120 行，保存/另存为约 70 行）。Rust 端新增 `save_ims`、`pick_save_path` 命令（lib.rs 约 90 行）及 `save_ims_entries_atomic`（ims_pack.rs 约 40 行）。
 
-编辑模式现已支持普通图片文件：打开任意图片即可进入编辑，插入子图后 `Ctrl+S` 保存为 `.ims.jpg`/`.ims.png`（webp/avif 自动转为 png）。无子图时直接退出不存盘。IMS 文件保持覆盖原文件的行为。
+### 已实现功能
+
+- **基础编辑**：插入、删除、替换子图（含多选/拖拽排序/封面保护）
+- **Undo/Redo**：命令模式，30 步栈，Ctrl+Z / Ctrl+Y
+- **保存**：`Ctrl+S`，原子写入（先 `.tmp` 再替换）
+- **另存为**：`编辑 → 另存为...`，原生保存对话框
+- **退出确认**：三按钮对话框（保存 / 不保存 / 取消）
+- **非 IMS 支持**：打开普通图片可进入编辑，插入子图后自动存为 IMS
+- **格式自动转换**：WebP/AVIF → PNG
 
 ### 与设计方案的主要差异
 
@@ -189,8 +197,10 @@ Phase 1-5 全部完成，代码位于 `src/app.js`（编辑模式约 480 行，U
 |------|-------------|---------|
 | IMS 源插入 | 只提取封面 | 提取**全部**子图 |
 | 代码拆分 | 新建 `src/edit.js` | 全部写入 `src/app.js` |
-| Undo/Redo | 独立编辑文件 | 纯 JS 实现，集成在 `src/app.js`，未新增 Rust 命令 |
-| 文件结构 | 需要 `save_ims` Rust 命令 | 已新增 `save_ims` + `save_ims_entries_atomic`（原子写入） |
+| 退出确认 | 简单 confirm() | 自定义三按钮模态对话框 |
+| Undo/Redo | 独立编辑文件 | 纯 JS 实现，集成在 `src/app.js` |
+| 保存 | 仅覆盖原文件 | 覆盖 + 另存为 + 原子写入 |
+| 文件结构 | 仅 `save_ims` | `save_ims` + `pick_save_path` + `save_ims_entries_atomic` |
 
 ## 总结
 

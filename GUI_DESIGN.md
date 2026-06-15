@@ -719,9 +719,10 @@ listen("batch-progress")  ←
 |-------|------|------|
 | Phase 1 | 基础编辑框架（菜单、切换、导航锁、脏状态） | 已完成 |
 | Phase 2 | 核心编辑操作（多选、删除、替换、封面保护、右键菜单） | 已完成 |
-| Phase 3 | 插入 + 排序（文件对话框、拖放、拖拽排序、IMS 提取） | 已完成 |
+| Phase 3 | 插入 + 排序（文件对话框、拖放、拖拽排序、IMS 提取） | ✅ 已完成 |
 | Phase 4 | Undo/Redo（命令模式、Ctrl+Z/Y、栈深度限制 30 步） | ✅ 已完成 |
-| Phase 5 | 保存（save_ims Rust 命令、原子写入、Ctrl+S） | ✅ 已完成 |
+| Phase 5 | 保存（save_ims、Ctrl+S、原子写入、另存为、退出确认） | ✅ 已完成 |
+| 扩展 | 非 IMS 编辑 + 另存为 + 保存确认对话框 | ✅ 已完成 |
 
 ### 17.2 入口与状态管理
 
@@ -774,5 +775,6 @@ listen("batch-progress")  ←
 ### 17.8 实现说明
 
 - 所有编辑逻辑位于 `src/app.js`（未拆分独立 `edit.js`），约 300 行编辑相关代码
-- 编辑状态集中管理在 `state` 对象：`editMode`、`dirty`、`selectedIndices`（Set）、`dragState`
-- 新增 Rust 命令：`save_ims`（原子写入，WebP/AVIF 自动转 PNG，仅剩封面时存为普通图片）
+- 编辑状态集中管理在 `state` 对象：`editMode`、`dirty`、`selectedIndices`（Set）、`undoStack`、`redoStack`
+- 新增 Rust 命令：`save_ims`（原子写入）、`pick_save_path`（另存为对话框）
+- 编辑模式支持普通图片：插入子图后自动存为新 `.ims.jpg`/`.ims.png` 文件
