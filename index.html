@@ -8,56 +8,67 @@
 </head>
 <body>
   <div id="app">
-    <!-- 菜单栏 -->
-    <div id="menu-bar">
-      <div class="menu-item" data-menu="file">
-        文件
-        <div class="menu-dropdown">
-          <div class="menu-action" data-action="open">打开文件... <span>Ctrl+O</span></div>
-          <div class="menu-separator"></div>
-          <div class="menu-action" data-action="export-current">导出当前图片... <span>Ctrl+E</span></div>
-          <div class="menu-action" data-action="export-all">导出全部子图... <span>Ctrl+Shift+E</span></div>
+    <!-- 自定义标题栏 -->
+    <div id="title-bar" data-tauri-drag-region>
+      <div class="title-bar-icon"></div>
+      <div class="title-bar-title">imsViewer</div>
+      <!-- 菜单栏 -->
+      <div id="menu-bar" data-tauri-drag-region>
+        <div class="menu-item" data-menu="file">
+          文件
+          <div class="menu-dropdown">
+            <div class="menu-action" data-action="open">打开文件... <span>Ctrl+O</span></div>
+            <div class="menu-separator"></div>
+            <div class="menu-action" data-action="export-current">导出当前图片... <span>Ctrl+E</span></div>
+            <div class="menu-action" data-action="export-all">导出全部子图... <span>Ctrl+Shift+E</span></div>
+          </div>
+        </div>
+        <div class="menu-item" data-menu="view">
+          视图
+          <div class="menu-dropdown">
+            <div class="menu-action" data-action="fit">适应窗口 <span>0</span></div>
+            <div class="menu-action" data-action="original">原始大小 <span>1</span></div>
+            <div class="menu-separator"></div>
+            <div class="menu-action" data-action="zoom-in">放大 <span>+</span></div>
+            <div class="menu-action" data-action="zoom-out">缩小 <span>-</span></div>
+          </div>
+        </div>
+        <div class="menu-item" id="menu-edit" data-menu="edit" style="display:none">
+          编辑
+          <div class="menu-dropdown">
+            <div class="menu-action" data-action="toggle-edit">进入编辑模式</div>
+            <div class="menu-separator"></div>
+            <div class="menu-action" data-action="save-ims">保存 <span>Ctrl+S</span></div>
+            <div class="menu-action" data-action="save-as">另存为...</div>
+          </div>
+        </div>
+        <div class="menu-item" data-menu="tools">
+          工具
+          <div class="menu-dropdown">
+            <div class="menu-action" data-action="export-current">导出当前图片... <span>Ctrl+E</span></div>
+            <div class="menu-action" data-action="export-all">导出全部子图... <span>Ctrl+Shift+E</span></div>
+            <div class="menu-separator"></div>
+            <div class="menu-action" data-action="batch-convert">批量转换...</div>
+            <div class="menu-action" data-action="batch-upgrade">批量升级 IMS 版本...</div>
+            <div class="menu-separator"></div>
+            <div class="menu-action" data-action="register-assoc">添加到右键菜单</div>
+          </div>
+        </div>
+        <div class="menu-item" data-menu="help">
+          帮助
+          <div class="menu-dropdown">
+            <div class="menu-action" data-action="help-shortcuts">快捷键参考</div>
+            <div class="menu-action" data-action="help-usage">使用说明</div>
+            <div class="menu-separator"></div>
+            <div class="menu-action" data-action="about">关于 imsViewer</div>
+          </div>
         </div>
       </div>
-      <div class="menu-item" data-menu="view">
-        视图
-        <div class="menu-dropdown">
-          <div class="menu-action" data-action="fit">适应窗口 <span>0</span></div>
-          <div class="menu-action" data-action="original">原始大小 <span>1</span></div>
-          <div class="menu-separator"></div>
-          <div class="menu-action" data-action="zoom-in">放大 <span>+</span></div>
-          <div class="menu-action" data-action="zoom-out">缩小 <span>-</span></div>
-        </div>
-      </div>
-      <div class="menu-item" id="menu-edit" data-menu="edit" style="display:none">
-        编辑
-        <div class="menu-dropdown">
-          <div class="menu-action" data-action="toggle-edit">进入编辑模式</div>
-          <div class="menu-separator"></div>
-          <div class="menu-action" data-action="save-ims">保存 <span>Ctrl+S</span></div>
-          <div class="menu-action" data-action="save-as">另存为...</div>
-        </div>
-      </div>
-      <div class="menu-item" data-menu="tools">
-        工具
-        <div class="menu-dropdown">
-          <div class="menu-action" data-action="export-current">导出当前图片... <span>Ctrl+E</span></div>
-          <div class="menu-action" data-action="export-all">导出全部子图... <span>Ctrl+Shift+E</span></div>
-          <div class="menu-separator"></div>
-          <div class="menu-action" data-action="batch-convert">批量转换...</div>
-          <div class="menu-action" data-action="batch-upgrade">批量升级 IMS 版本...</div>
-          <div class="menu-separator"></div>
-          <div class="menu-action" data-action="register-assoc">添加到右键菜单</div>
-        </div>
-      </div>
-      <div class="menu-item" data-menu="help">
-        帮助
-        <div class="menu-dropdown">
-          <div class="menu-action" data-action="help-shortcuts">快捷键参考</div>
-          <div class="menu-action" data-action="help-usage">使用说明</div>
-          <div class="menu-separator"></div>
-          <div class="menu-action" data-action="about">关于 imsViewer</div>
-        </div>
+      <!-- 窗口控制按钮 -->
+      <div class="window-controls">
+        <button id="btn-minimize" title="最小化">─</button>
+        <button id="btn-maximize" title="最大化">□</button>
+        <button id="btn-close" title="关闭">✕</button>
       </div>
     </div>
 

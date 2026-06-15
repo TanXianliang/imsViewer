@@ -67,6 +67,7 @@ function init() {
   setupContextMenu();
   setupThumbDrag();
   setupFolderBar();
+  setupWindowControls();
   window.addEventListener('resize', () => {
     setupCanvasSize();
     if (state.isFitMode && state.imgObj) {
@@ -732,6 +733,14 @@ function setupHtml5Drop() {
       if (path) await openFile(path);
     }
   });
+}
+
+// ===== 窗口控制 =====
+function setupWindowControls() {
+  const win = getCurrentWindow();
+  $('#btn-minimize').addEventListener('click', () => win.minimize());
+  $('#btn-maximize').addEventListener('click', () => win.toggleMaximize());
+  $('#btn-close').addEventListener('click', () => win.close());
 }
 
 // ===== 菜单栏 =====
