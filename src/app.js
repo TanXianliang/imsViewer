@@ -772,6 +772,9 @@ function setupMenuActions() {
         case 'toggle-edit':
           toggleEditMode();
           break;
+        case 'save-ims':
+          saveFile();
+          break;
         case 'help-shortcuts':
           alert(
             '═══ 键盘快捷键 ═══\n\n' +
@@ -780,6 +783,12 @@ function setupMenuActions() {
             '  ↑ ↓  切换上一个/下一个子图 (IMS)\n' +
             '  Home  跳到第一个文件\n' +
             '  End   跳到最后一个文件\n\n' +
+            '编辑模式:\n' +
+            '  Ctrl+S  保存\n' +
+            '  Ctrl+Z  撤销\n' +
+            '  Ctrl+Y  重做\n' +
+            '  Del     删除选中\n' +
+            '  Esc     退出编辑\n\n' +
             '滚轮:\n' +
             '  滚轮      切换子图\n' +
             '  Shift+滚轮 切换文件\n' +
