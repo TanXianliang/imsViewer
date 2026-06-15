@@ -735,12 +735,15 @@ function setupHtml5Drop() {
   });
 }
 
-// ===== 窗口控制 =====
+// ===== 窗口控制（全局引用，供 HTML onclick/onmousedown 调用） =====
 function setupWindowControls() {
   const win = getCurrentWindow();
-  $('#btn-minimize').addEventListener('click', () => win.minimize());
-  $('#btn-maximize').addEventListener('click', () => win.toggleMaximize());
-  $('#btn-close').addEventListener('click', () => win.close());
+  window.__imsViewer = {
+    minimize: () => win.minimize(),
+    maximize: () => win.toggleMaximize(),
+    close: () => win.close(),
+    beginDrag: () => win.startDragging(),
+  };
 }
 
 // ===== 菜单栏 =====

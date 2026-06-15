@@ -10,7 +10,7 @@
   <div id="app">
     <!-- 自定义标题栏 -->
     <div id="title-bar">
-      <div class="title-bar-drag" data-tauri-drag-region>
+      <div class="title-bar-drag" onmousedown="window.__imsViewer.beginDrag()">
         <span class="title-bar-icon"></span>
         <span class="title-bar-title">imsViewer</span>
       </div>
@@ -67,12 +67,12 @@
         </div>
       </div>
       <!-- 拖拽占位区 -->
-      <div class="title-bar-drag title-bar-spacer" data-tauri-drag-region></div>
+      <div class="title-bar-drag title-bar-spacer" onmousedown="window.__imsViewer.beginDrag()"></div>
       <!-- 窗口控制按钮 -->
       <div class="window-controls">
-        <button id="btn-minimize" title="最小化">─</button>
-        <button id="btn-maximize" title="最大化">□</button>
-        <button id="btn-close" title="关闭">✕</button>
+        <button onclick="window.__imsViewer.minimize()" title="最小化">─</button>
+        <button onclick="window.__imsViewer.maximize()" title="最大化">□</button>
+        <button onclick="window.__imsViewer.close()" title="关闭">✕</button>
       </div>
     </div>
 
