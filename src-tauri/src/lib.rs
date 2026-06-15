@@ -14,8 +14,8 @@ use tauri::Emitter;
 mod ims;
 mod ims_pack;
 
-use ims::{scan_folder, parse_ims, read_sub_image, is_ims_file, file_type_label, FilePayload, SubImagePayload};
-use ims_pack::{pack_ims, scan_multiple_folders, compute_output_path, upgrade_ims_file, scan_ims_files, BatchConfig, ProgressPayload};
+use ims::{scan_folder, parse_ims, read_sub_image, is_ims_file, file_type_label, FilePayload, SubImagePayload, SaveImagePayload};
+use ims_pack::{pack_ims, scan_multiple_folders, compute_output_path, upgrade_ims_file, scan_ims_files, save_ims_entries_atomic, UpEntry, BatchConfig, ProgressPayload};
 
 // ============================================================
 // Tauri Commands
@@ -131,6 +131,60 @@ fn open_file(path: String) -> Result<FilePayload, String> {
             sub_images,
         })
     }
+}
+
+/// 保存编辑后的 IMS 文件（原子写入：先写临时文件，成功后再替换）
+///
+/// 接收前端传回的 subImages 数组，写入 IMS v2 文件。
+/// - 仅剩 1 张封面 → 存为普通图片
+/// - 多张图片 → 构建完整 IMS v2（含 SHA-256 哈希）
+/// - WebP/AVIF 自动转 PNG
+#[tauri::command]
+fn save_ims(path: String, images: Vec<SaveImagePayload>) -> Result<(), String> {
+    if images.is_empty() {
+        return Err("图片列表为空".into());
+    }
+
+    let mut entries: Vec<UpEntry> = Vec::with_capacity(images.len());
+
+    for img in &images {
+        // base64 解码
+        let raw_bytes = base64::engine::general_purpose::STANDARD
+            .decode(&img.bytes_base64)
+            .map_err(|e| format!("base64 解码失败: {}", e))?;
+
+        // WebP/AVIF → 自动转 PNG
+        let (final_bytes, final_format, final_filename) = if img.format == 2 || img.format == 3 {
+            let decoded = image::load_from_memory(&raw_bytes)
+                .map_err(|e| format!("解码图片失败: {} (格式: {})", e, if img.format == 2 { "WebP" } else { "AVIF" }))?;
+            let mut png_bytes = Vec::new();
+            decoded
+                .write_to(&mut std::io::Cursor::new(&mut png_bytes), image::ImageFormat::Png)
+                .map_err(|e| format!("PNG 编码失败: {}", e))?;
+            let new_name = format!(
+                "{}.png",
+                Path::new(&img.filename)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("image")
+            );
+            (png_bytes, 1u8, new_name)
+        } else {
+            (raw_bytes, img.format, img.filename.clone())
+        };
+
+        entries.push(UpEntry {
+            filename: final_filename,
+            format: final_format,
+            bytes: final_bytes,
+            is_cover: img.is_cover,
+        });
+    }
+
+    // 封面排第一位
+    entries.sort_by_key(|e| !e.is_cover);
+
+    save_ims_entries_atomic(&path, &entries)
 }
 
 /// 弹出原生文件选择对话框，返回选中的文件路径
@@ -605,6 +659,7 @@ pub fn run(launch_file: Option<String>) {
         .manage(LaunchFile(launch_file))
         .invoke_handler(tauri::generate_handler![
             open_file,
+            save_ims,
             pick_file,
             pick_folder,
             get_sub_image,

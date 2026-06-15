@@ -391,11 +391,49 @@ fn write_ims_entries(output_path: &str, entries: &[UpEntry]) -> Result<(), Strin
     Ok(())
 }
 
-struct UpEntry {
-    filename: String,
-    format: u8,
-    bytes: Vec<u8>,
-    is_cover: bool,
+pub struct UpEntry {
+    pub filename: String,
+    pub format: u8,
+    pub bytes: Vec<u8>,
+    pub is_cover: bool,
+}
+
+/// 原子写入 IMS 文件：先写临时文件，成功后再替换目标文件
+pub fn save_ims_entries_atomic(output_path: &str, entries: &[UpEntry]) -> Result<(), String> {
+    if entries.is_empty() {
+        return Err("图片列表为空".into());
+    }
+
+    // 仅剩封面 → 存为普通图片（不加 IMS 索引）
+    if entries.len() == 1 {
+        if let Some(parent) = Path::new(output_path).parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        let tmp = format!("{}.tmp", output_path);
+        std::fs::write(&tmp, &entries[0].bytes)
+            .map_err(|e| format!("写入临时文件失败: {}", e))?;
+        // 原子替换
+        if Path::new(output_path).exists() {
+            std::fs::remove_file(output_path)
+                .map_err(|e| format!("删除旧文件失败: {}", e))?;
+        }
+        std::fs::rename(&tmp, output_path)
+            .map_err(|e| format!("重命名临时文件失败: {}", e))?;
+        return Ok(());
+    }
+
+    let tmp = format!("{}.tmp", output_path);
+    write_ims_entries(&tmp, entries)?;
+
+    // 原子替换：先删后改名
+    if Path::new(output_path).exists() {
+        std::fs::remove_file(output_path)
+            .map_err(|e| format!("删除旧文件失败: {}", e))?;
+    }
+    std::fs::rename(&tmp, output_path)
+        .map_err(|e| format!("重命名临时文件失败: {}", e))?;
+
+    Ok(())
 }
 
 /// 扫描多个文件夹，汇总所有 ImageGroup

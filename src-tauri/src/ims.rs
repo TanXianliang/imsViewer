@@ -68,6 +68,15 @@ pub struct FilePayload {
     pub sub_images: Vec<SubImagePayload>,
 }
 
+/// 前端传来的保存图片数据
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct SaveImagePayload {
+    pub filename: String,
+    pub format: u8,
+    pub bytes_base64: String,
+    pub is_cover: bool,
+}
+
 /// 单张子图的元数据 + 数据
 #[derive(Debug, Clone, Serialize)]
 pub struct SubImagePayload {

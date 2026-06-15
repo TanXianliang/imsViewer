@@ -591,6 +591,12 @@ function setupKeyboard() {
           redo();  // Ctrl+Y = 重做
         }
         break;
+      case 's':
+        if (e.ctrlKey && state.editMode) {
+          e.preventDefault();
+          saveFile();
+        }
+        break;
       case 'o':
         if (e.ctrlKey) {
           e.preventDefault();
@@ -1359,6 +1365,45 @@ async function insertImages() {
     }
   } catch (e) {
     console.error('插入失败:', e);
+  }
+}
+
+// 保存 IMS 文件（Ctrl+S）
+async function saveFile() {
+  if (!state.editMode || !state.imsInfo) return;
+
+  const filepath = state.folderList[state.currentFileIdx]?.filepath;
+  if (!filepath) return;
+
+  try {
+    const images = state.subImages.map(sub => ({
+      filename: sub.filename,
+      format: sub.format,
+      bytes_base64: sub.bytes_base64,
+      is_cover: sub.is_cover,
+    }));
+
+    await invoke('save_ims', { path: filepath, images });
+
+    // 保存成功：清除 dirty 和 undo/redo 栈
+    state.dirty = false;
+    state.undoStack = [];
+    state.redoStack = [];
+
+    // 重新打开文件以刷新 IMS 元数据
+    const payload = await invoke('open_file', { path: filepath });
+    state.subImages = payload.sub_images;
+    state.imsInfo = payload.ims_info;
+    buildThumbnails();
+    updateSelectionHighlight();
+    if (state.currentSubIdx >= state.subImages.length) {
+      state.currentSubIdx = Math.max(0, state.subImages.length - 1);
+    }
+    loadCurrentImage();
+    setStatus('已保存');
+  } catch (e) {
+    console.error('保存失败:', e);
+    alert('保存失败: ' + e);
   }
 }
 
