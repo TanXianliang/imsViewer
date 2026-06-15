@@ -100,6 +100,19 @@ body {
   color: #fff;
 }
 
+/* 窗口失焦 → 标题栏变暗 */
+.window-unfocused #title-bar {
+  background: #2d2d2d;
+}
+.window-unfocused #title-bar .title-bar-icon,
+.window-unfocused #title-bar #title-filename,
+.window-unfocused #title-bar .menu-item {
+  opacity: 0.5;
+}
+.window-unfocused #title-bar .window-controls button svg {
+  opacity: 0.4;
+}
+
 /* ===== 菜单栏 ===== */
 #menu-bar {
   display: flex;
