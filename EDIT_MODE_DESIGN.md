@@ -179,7 +179,9 @@ MoveCommand:   { fromIndices, toIndex }
 
 ## 实现现状
 
-Phase 1-5 全部完成，代码位于 `src/app.js`（编辑模式约 450 行，Undo/Redo 约 120 行，保存约 30 行）。Rust 端新增 `save_ims` 命令（lib.rs 约 60 行）及 `save_ims_entries_atomic`（ims_pack.rs 约 40 行）。
+Phase 1-5 全部完成，代码位于 `src/app.js`（编辑模式约 480 行，Undo/Redo 约 120 行，保存约 50 行）。Rust 端新增 `save_ims` 命令（lib.rs 约 60 行）及 `save_ims_entries_atomic`（ims_pack.rs 约 40 行）。
+
+编辑模式现已支持普通图片文件：打开任意图片即可进入编辑，插入子图后 `Ctrl+S` 保存为 `.ims.jpg`/`.ims.png`（webp/avif 自动转为 png）。无子图时直接退出不存盘。IMS 文件保持覆盖原文件的行为。
 
 ### 与设计方案的主要差异
 

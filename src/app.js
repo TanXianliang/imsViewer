@@ -206,7 +206,7 @@ function buildThumbnails() {
   dom.thumbnailList.innerHTML = '';
   const isIms = state.imsInfo !== null;
 
-  if (isIms) {
+  if (isIms || state.editMode) {
     dom.thumbnailHeader.textContent = `子图列表 (${state.subImages.length})`;
     state.subImages.forEach((sub, i) => {
       dom.thumbnailList.appendChild(createThumbItem(sub, i));
@@ -1368,12 +1368,30 @@ async function insertImages() {
   }
 }
 
-// 保存 IMS 文件（Ctrl+S）
+// 计算非 IMS 文件保存时的 IMS 输出路径
+function computeImsOutputPath(originalPath) {
+  const ext = originalPath.split('.').pop().toLowerCase();
+  const stem = originalPath.slice(0, originalPath.lastIndexOf('.'));
+  // jpg/jpeg → .ims.jpg, png → .ims.png, 其他 → .ims.png
+  const outExt = (ext === 'jpg' || ext === 'jpeg') ? 'jpg' : 'png';
+  return `${stem}.ims.${outExt}`;
+}
+
+// 保存文件（Ctrl+S）
 async function saveFile() {
-  if (!state.editMode || !state.imsInfo) return;
+  if (!state.editMode) return;
 
   const filepath = state.folderList[state.currentFileIdx]?.filepath;
   if (!filepath) return;
+
+  // 非 IMS 文件，无子图 → 不存盘，退出编辑模式
+  if (!state.imsInfo && state.subImages.length <= 1) {
+    setStatus('无子图片，已退出编辑');
+    exitEditMode(false);
+    return;
+  }
+
+  const savePath = state.imsInfo ? filepath : computeImsOutputPath(filepath);
 
   try {
     const images = state.subImages.map(sub => ({
@@ -1383,23 +1401,29 @@ async function saveFile() {
       is_cover: sub.is_cover,
     }));
 
-    await invoke('save_ims', { path: filepath, images });
+    await invoke('save_ims', { path: savePath, images });
 
     // 保存成功：清除 dirty 和 undo/redo 栈
     state.dirty = false;
     state.undoStack = [];
     state.redoStack = [];
 
-    // 重新打开文件以刷新 IMS 元数据
-    const payload = await invoke('open_file', { path: filepath });
-    state.subImages = payload.sub_images;
-    state.imsInfo = payload.ims_info;
-    buildThumbnails();
-    updateSelectionHighlight();
-    if (state.currentSubIdx >= state.subImages.length) {
-      state.currentSubIdx = Math.max(0, state.subImages.length - 1);
+    // 重新打开文件刷新状态
+    if (state.imsInfo) {
+      // IMS 覆盖保存：重新打开原路径刷新元数据
+      const payload = await invoke('open_file', { path: savePath });
+      state.subImages = payload.sub_images;
+      state.imsInfo = payload.ims_info;
+      buildThumbnails();
+      updateSelectionHighlight();
+      if (state.currentSubIdx >= state.subImages.length) {
+        state.currentSubIdx = Math.max(0, state.subImages.length - 1);
+      }
+      loadCurrentImage();
+    } else {
+      // 非 IMS → IMS：用 openFile 完整刷新（更新文件列表、导航到新文件、退出编辑模式）
+      await openFile(savePath);
     }
-    loadCurrentImage();
     setStatus('已保存');
   } catch (e) {
     console.error('保存失败:', e);
