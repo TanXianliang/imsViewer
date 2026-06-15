@@ -449,7 +449,7 @@ async function openFile(filepath) {
     // 显示编辑菜单
     $('#menu-edit').style.display = '';
     // 文件切换时自动退出编辑模式
-    if (state.editMode) exitEditMode(false);
+    if (state.editMode) await exitEditMode(false);
   } catch (err) {
     console.error('打开文件失败:', err);
     alert('打开文件失败: ' + err);
@@ -553,7 +553,7 @@ function updateStatusBar() {
 
 // ===== 键盘事件 =====
 function setupKeyboard() {
-  document.addEventListener('keydown', (e) => {
+  document.addEventListener('keydown', async (e) => {
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
 
     switch (e.key) {
@@ -1177,9 +1177,9 @@ function refreshAfterCommand() {
 }
 
 // ===== 编辑模式 =====
-function toggleEditMode() {
+async function toggleEditMode() {
   if (state.editMode) {
-    exitEditMode(true);
+    await exitEditMode(true);
   } else {
     enterEditMode();
   }
@@ -1458,9 +1458,14 @@ function showSaveConfirm() {
   });
 }
 
+let exitingEditMode = false; // 防止退出对话框重复弹出
+
 async function exitEditMode(confirmIfDirty) {
   if (confirmIfDirty && state.dirty) {
+    if (exitingEditMode) return; // 已有确认对话框
+    exitingEditMode = true;
     const choice = await showSaveConfirm();
+    exitingEditMode = false;
     if (choice === 'save') {
       await saveFile();
       // saveFile 对 IMS 保持编辑模式，需额外退出；非 IMS 已通过 openFile 退出
