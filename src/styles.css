@@ -48,6 +48,7 @@ body {
   height: 16px;
   margin: 0 8px 0 10px;
   flex-shrink: 0;
+  pointer-events: none;
 }
 .title-bar-spacer {
   flex: 1;
@@ -63,6 +64,7 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   padding-left: 4px;
+  pointer-events: none;
 }
 .window-controls {
   display: flex;
