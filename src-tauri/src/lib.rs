@@ -204,6 +204,22 @@ async fn pick_file(app: tauri::AppHandle) -> Result<Option<String>, String> {
     Ok(result.map(|p| p.to_string()))
 }
 
+/// 弹出另存为对话框
+#[tauri::command]
+async fn pick_save_path(app: tauri::AppHandle, default_name: String) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let result = app
+        .dialog()
+        .file()
+        .add_filter("IMS 文件", &["ims.jpg", "ims.png"])
+        .add_filter("所有文件", &["*"])
+        .set_file_name(default_name)
+        .blocking_save_file();
+
+    Ok(result.map(|p| p.to_string()))
+}
+
 /// 弹出文件夹选择对话框
 #[tauri::command]
 async fn pick_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
@@ -661,6 +677,7 @@ pub fn run(launch_file: Option<String>) {
             open_file,
             save_ims,
             pick_file,
+            pick_save_path,
             pick_folder,
             get_sub_image,
             extract_image,

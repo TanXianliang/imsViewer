@@ -775,6 +775,9 @@ function setupMenuActions() {
         case 'save-ims':
           saveFile();
           break;
+        case 'save-as':
+          saveFileAs();
+          break;
         case 'help-shortcuts':
           alert(
             '═══ 键盘快捷键 ═══\n\n' +
@@ -1465,6 +1468,39 @@ function showSaveConfirm() {
     // 点击遮罩背景 = 取消
     overlay.addEventListener('click', (e) => { if (e.target === overlay) { cleanup(); resolve('cancel'); } });
   });
+}
+
+// 另存为
+async function saveFileAs() {
+  if (!state.editMode) return;
+
+  const currentPath = state.folderList[state.currentFileIdx]?.filepath;
+  // 默认文件名：IMS 用原名，非 IMS 转 .ims.jpg/.ims.png
+  const defaultName = state.imsInfo
+    ? (currentPath || 'output').split(/[\\/]/).pop()
+    : computeImsOutputPath(currentPath || 'image.jpg').split(/[\\/]/).pop();
+
+  try {
+    const savePath = await invoke('pick_save_path', { defaultName });
+    if (!savePath) return;
+
+    const images = state.subImages.map(sub => ({
+      filename: sub.filename,
+      format: sub.format,
+      bytes_base64: sub.bytes_base64,
+      is_cover: sub.is_cover,
+    }));
+
+    await invoke('save_ims', { path: savePath, images });
+
+    state.dirty = false;
+    state.undoStack = [];
+    state.redoStack = [];
+    setStatus('已另存为: ' + savePath.split(/[\\/]/).pop());
+  } catch (e) {
+    console.error('另存为失败:', e);
+    alert('另存为失败: ' + e);
+  }
 }
 
 let exitingEditMode = false; // 防止退出对话框重复弹出
