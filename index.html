@@ -10,8 +10,10 @@
   <div id="app">
     <!-- 自定义标题栏 -->
     <div id="title-bar">
-      <div class="title-bar-icon"></div>
-      <div class="title-bar-title">imsViewer</div>
+      <div class="title-bar-drag" data-tauri-drag-region>
+        <span class="title-bar-icon"></span>
+        <span class="title-bar-title">imsViewer</span>
+      </div>
       <!-- 菜单栏 -->
       <div id="menu-bar">
         <div class="menu-item" data-menu="file">
@@ -64,6 +66,8 @@
           </div>
         </div>
       </div>
+      <!-- 拖拽占位区 -->
+      <div class="title-bar-drag title-bar-spacer" data-tauri-drag-region></div>
       <!-- 窗口控制按钮 -->
       <div class="window-controls">
         <button id="btn-minimize" title="最小化">─</button>
