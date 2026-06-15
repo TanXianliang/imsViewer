@@ -535,6 +535,10 @@ function toggleImsRows(visible) {
   });
 }
 
+function setStatus(msg) {
+  dom.statusSubPos.textContent = msg;
+}
+
 function updateStatusBar() {
   if (state.folderList.length === 0) {
     dom.statusFilePos.textContent = '未打开文件';
