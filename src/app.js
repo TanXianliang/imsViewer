@@ -738,6 +738,17 @@ function setupHtml5Drop() {
 // ===== 窗口控制 =====
 function setupWindowControls() {
   const win = getCurrentWindow();
+
+  // 标题栏拖拽：排除按钮和菜单项
+  $('#title-bar').addEventListener('mousedown', (e) => {
+    if (e.target.closest('button') || e.target.closest('.menu-item') ||
+        e.target.closest('.menu-dropdown') || e.target.closest('.menu-action')) {
+      return;
+    }
+    win.startDragging();
+  });
+
+  // 窗口控制按钮
   $('#btn-minimize').addEventListener('click', () => win.minimize());
   $('#btn-maximize').addEventListener('click', () => win.toggleMaximize());
   $('#btn-close').addEventListener('click', () => win.close());

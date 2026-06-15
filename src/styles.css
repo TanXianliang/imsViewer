@@ -42,7 +42,6 @@ body {
   border-bottom: 1px solid var(--border);
   z-index: 100;
   flex-shrink: 0;
-  -webkit-app-region: drag;
 }
 .title-bar-icon {
   width: 30px;
@@ -60,7 +59,6 @@ body {
   display: flex;
   height: 30px;
   flex-shrink: 0;
-  -webkit-app-region: no-drag;
 }
 .window-controls button {
   width: 46px;
@@ -90,7 +88,6 @@ body {
   height: 30px;
   padding: 0;
   flex: 1;
-  -webkit-app-region: no-drag;
 }
 .menu-item {
   position: relative;
@@ -100,9 +97,6 @@ body {
   font-size: 12px;
 }
 .menu-item:hover { background: var(--bg-hover); }
-.menu-dropdown {
-  -webkit-app-region: no-drag;
-}
 .menu-dropdown {
   display: none;
   position: absolute;
