@@ -736,13 +736,30 @@ function setupHtml5Drop() {
 }
 
 // ===== 窗口控制（全局引用，供 HTML onclick 调用） =====
-function setupWindowControls() {
+async function setupWindowControls() {
   const win = getCurrentWindow();
+  const maxBtn = $('#btn-maximize');
+
+  // 更新最大化/还原图标
+  const updateMaxIcon = async () => {
+    const maximized = await win.isMaximized();
+    maxBtn.classList.toggle('restore', maximized);
+    maxBtn.title = maximized ? '还原' : '最大化';
+  };
+
+  // 按钮点击 + 图标更新
   window.__imsViewer = {
     minimize: () => win.minimize(),
-    maximize: () => win.toggleMaximize(),
+    maximize: async () => {
+      await win.toggleMaximize();
+      updateMaxIcon();
+    },
     close: () => win.close(),
   };
+
+  // 初始状态 + 监听窗口变化
+  updateMaxIcon();
+  win.onResized(updateMaxIcon);
 }
 
 // ===== 菜单栏 =====

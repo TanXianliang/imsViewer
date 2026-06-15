@@ -76,6 +76,10 @@ body {
 .window-controls button:hover svg {
   opacity: 1;
 }
+/* 最大化/还原图标切换 */
+#btn-maximize .icon-restore { display: none; }
+#btn-maximize.restore .icon-max { display: none; }
+#btn-maximize.restore .icon-restore { display: inline; }
 .window-controls button:hover {
   background: var(--bg-hover);
   color: var(--text-primary);
