@@ -592,6 +592,7 @@ function setupKeyboard() {
         }
         break;
       case 's':
+      case 'S':
         if (e.ctrlKey && state.editMode) {
           e.preventDefault();
           saveFile();
