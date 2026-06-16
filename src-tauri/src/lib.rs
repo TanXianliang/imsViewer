@@ -8,27 +8,140 @@
 //!   extract_all()      — 导出全部子图
 
 use base64::Engine;
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Mutex;
 use tauri::Emitter;
 
 mod ims;
 mod ims_pack;
 
-use ims::{scan_folder, parse_ims, read_sub_image, is_ims_file, file_type_label, FilePayload, SubImagePayload, SaveImagePayload};
+use ims::{parse_ims, parse_ims_and_read_cover, read_sub_image, is_ims_file, file_type_label, FilePayload, SubImagePayload, SaveImagePayload, FolderEntry};
 use ims_pack::{pack_ims, scan_multiple_folders, compute_output_path, upgrade_ims_file, scan_ims_files, save_ims_entries_atomic, UpEntry, BatchConfig, ProgressPayload};
+
+/// IMS 解析缓存：避免对同一文件反复调用 parse_ims（读取索引区）。
+/// 键为文件路径，值为最近一次解析结果。
+pub struct ImsCache(pub Mutex<HashMap<String, ims::ImsFileInfo>>);
+
+/// 文件夹扫描缓存：目录 → 文件列表（仅文件名，无 metadata，file_size 为 0）
+pub struct FolderScanState {
+    cache: Mutex<HashMap<String, Vec<FolderEntry>>>,
+}
+
+impl FolderScanState {
+    fn new() -> Self {
+        Self { cache: Mutex::new(HashMap::new()) }
+    }
+}
+
+/// 缓存最大条目数。IMS 元数据很小（每条 ~KB 级），64 条约几十 KB。
+const MAX_CACHE_ENTRIES: usize = 64;
+
+/// 带缓存的 parse_ims：命中缓存则直接返回，否则解析并写入缓存。
+/// 超过 MAX_CACHE_ENTRIES 时全部清空，防止无界增长。
+fn cached_parse_ims(cache: &ImsCache, filepath: &str) -> Result<ims::ImsFileInfo, String> {
+    {
+        let map = cache.0.lock().map_err(|e| format!("锁缓存失败: {}", e))?;
+        if let Some(info) = map.get(filepath) {
+            return Ok(info.clone());
+        }
+    }
+    let info = parse_ims(filepath)?;
+    {
+        let mut map = cache.0.lock().map_err(|e| format!("锁缓存失败: {}", e))?;
+        if map.len() >= MAX_CACHE_ENTRIES {
+            map.clear();
+        }
+        map.insert(filepath.to_string(), info.clone());
+    }
+    Ok(info)
+}
+
+// ============================================================
+// 文件夹扫描管理
+// ============================================================
+
+/// 纯扫描：列文件名 + 排序，不调 metadata()
+fn do_scan_dir(dir_path: &str) -> Vec<FolderEntry> {
+    let mut entries: Vec<FolderEntry> = Vec::new();
+    if let Ok(read_dir) = std::fs::read_dir(dir_path) {
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            if path.is_dir() { continue; }
+            let filename = match path.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            if filename.starts_with('.') { continue; }
+            let ext = path.extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_lowercase())
+                .unwrap_or_default();
+            let stem = path.file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_lowercase())
+                .unwrap_or_default();
+            let is_ims = stem.contains(".ims");
+            if !matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "webp" | "avif") { continue; }
+            entries.push(FolderEntry {
+                filepath: path.to_str().unwrap_or(&filename).to_string(),
+                filename,
+                is_ims,
+                file_size: 0,
+            });
+        }
+    }
+    entries.sort_by(|a, b| natord_compare(&a.filename, &b.filename));
+    entries
+}
+
+fn natord_compare(a: &str, b: &str) -> std::cmp::Ordering {
+    let a_chars: Vec<char> = a.to_lowercase().chars().collect();
+    let b_chars: Vec<char> = b.to_lowercase().chars().collect();
+    let mut i = 0; let mut j = 0;
+    while i < a_chars.len() && j < b_chars.len() {
+        if a_chars[i].is_ascii_digit() && b_chars[j].is_ascii_digit() {
+            let mut an = String::new(); let mut bn = String::new();
+            while i < a_chars.len() && a_chars[i].is_ascii_digit() { an.push(a_chars[i]); i += 1; }
+            while j < b_chars.len() && b_chars[j].is_ascii_digit() { bn.push(b_chars[j]); j += 1; }
+            match an.parse::<u64>().unwrap_or(0).cmp(&bn.parse::<u64>().unwrap_or(0)) {
+                std::cmp::Ordering::Equal => continue,
+                o => return o,
+            }
+        } else {
+            match a_chars[i].cmp(&b_chars[j]) {
+                std::cmp::Ordering::Equal => { i += 1; j += 1; }
+                o => return o,
+            }
+        }
+    }
+    a_chars.len().cmp(&b_chars.len())
+}
+
+/// 获取文件夹列表。缓存命中 → 同步返回。首次 → 同步扫描 + 缓存（无 metadata，极快）。
+fn get_or_scan_folder(
+    parent_dir: &str,
+    state: &FolderScanState,
+) -> Vec<FolderEntry> {
+    {
+        let cache = state.cache.lock().unwrap();
+        if let Some(list) = cache.get(parent_dir) {
+            return list.clone();
+        }
+    }
+
+    // 首次：同步扫描（只列文件名，不调 metadata），SMB 上也可接受
+    let list = do_scan_dir(parent_dir);
+    state.cache.lock().unwrap().insert(parent_dir.to_string(), list.clone());
+    list
+}
 
 // ============================================================
 // Tauri Commands
 // ============================================================
 
-/// 打开一个图片文件（IMS 或普通图片）
-///
-/// 返回 FilePayload 包含：
-/// - 文件夹中所有可浏览文件列表
-/// - 当前文件的 IMS 元数据（如果是 IMS）
-/// - 封面/首张图片的 base64 编码数据
 #[tauri::command]
-fn open_file(path: String) -> Result<FilePayload, String> {
+fn open_file(path: String, cache: tauri::State<'_, ImsCache>, scan_state: tauri::State<'_, FolderScanState>) -> Result<FilePayload, String> {
     let filepath = Path::new(&path);
 
     if !filepath.exists() {
@@ -46,25 +159,27 @@ fn open_file(path: String) -> Result<FilePayload, String> {
         .len();
 
     let is_ims = is_ims_file(&path);
+    let file_type = file_type_label(&path);
 
-    // 扫描所在文件夹
+    // 同步获取文件夹列表（只列文件名无 metadata），缓存自动复用
     let parent_dir = filepath
         .parent()
         .and_then(|p| p.to_str())
-        .unwrap_or(".");
-    let folder_list = scan_folder(parent_dir)?;
-
-    // 找到当前文件在文件夹列表中的位置
-    let file_index = folder_list
-        .iter()
-        .position(|e| e.filepath == path)
-        .unwrap_or(0);
-
-    let file_type = file_type_label(&path);
+        .unwrap_or(".")
+        .to_string();
+    let folder_list = get_or_scan_folder(&parent_dir, &scan_state);
+    let file_index = folder_list.iter().position(|e| e.filepath == path).unwrap_or(0);
 
     if is_ims {
-        // ---- IMS 文件 ----
-        let ims_info = parse_ims(&path)?;
+        // ---- IMS 文件：一次打开完成解析 + 封面读取 ----
+        let (ims_info, cover_bytes) = parse_ims_and_read_cover(&path)?;
+        let cover_b64 = base64::engine::general_purpose::STANDARD.encode(&cover_bytes);
+
+        // 写入缓存，后续 get_sub_image / extract 可复用
+        {
+            let mut map = cache.0.lock().map_err(|e| format!("锁缓存失败: {}", e))?;
+            map.insert(path.clone(), ims_info.clone());
+        }
 
         // 按需加载：仅封面或首张图在打开时编码，其余延迟到切换时加载
         let sub_images: Vec<SubImagePayload> = ims_info
@@ -72,8 +187,7 @@ fn open_file(path: String) -> Result<FilePayload, String> {
             .iter()
             .map(|img| {
                 let bytes_base64 = if img.is_cover || img.index == 0 {
-                    let bytes = read_sub_image(&path, img.data_offset, img.data_length).unwrap_or_default();
-                    base64::engine::general_purpose::STANDARD.encode(&bytes)
+                    cover_b64.clone()
                 } else {
                     String::new() // 延迟加载
                 };
@@ -140,7 +254,7 @@ fn open_file(path: String) -> Result<FilePayload, String> {
 /// - 多张图片 → 构建完整 IMS v2（含 SHA-256 哈希）
 /// - WebP/AVIF 自动转 PNG
 #[tauri::command]
-fn save_ims(path: String, images: Vec<SaveImagePayload>) -> Result<(), String> {
+fn save_ims(path: String, images: Vec<SaveImagePayload>, cache: tauri::State<'_, ImsCache>) -> Result<(), String> {
     if images.is_empty() {
         return Err("图片列表为空".into());
     }
@@ -184,7 +298,16 @@ fn save_ims(path: String, images: Vec<SaveImagePayload>) -> Result<(), String> {
     // 封面排第一位
     entries.sort_by_key(|e| !e.is_cover);
 
-    save_ims_entries_atomic(&path, &entries)
+    let result = save_ims_entries_atomic(&path, &entries);
+
+    // 保存成功后清除缓存，后续 open_file 会重新解析
+    if result.is_ok() {
+        if let Ok(mut map) = cache.0.lock() {
+            map.remove(&path);
+        }
+    }
+
+    result
 }
 
 /// 弹出原生文件选择对话框，返回选中的文件路径
@@ -234,13 +357,14 @@ async fn pick_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
 }
 
 /// 按需获取 IMS 文件中指定索引的子图数据（base64）
+/// 使用缓存避免对同一文件反复解析 IMS 索引。
 #[tauri::command]
-fn get_sub_image(path: String, index: usize) -> Result<SubImagePayload, String> {
+fn get_sub_image(path: String, index: usize, cache: tauri::State<'_, ImsCache>) -> Result<SubImagePayload, String> {
     if !is_ims_file(&path) {
         return Err("非 IMS 文件，无法获取子图".into());
     }
 
-    let ims_info = parse_ims(&path)?;
+    let ims_info = cached_parse_ims(&cache, &path)?;
 
     let img = ims_info
         .images
@@ -264,11 +388,11 @@ fn get_sub_image(path: String, index: usize) -> Result<SubImagePayload, String> 
 
 /// 导出单张图片——弹出保存对话框
 #[tauri::command]
-async fn extract_image(app: tauri::AppHandle, path: String, index: usize) -> Result<String, String> {
+async fn extract_image(app: tauri::AppHandle, path: String, index: usize, cache: tauri::State<'_, ImsCache>) -> Result<String, String> {
     use tauri_plugin_dialog::DialogExt;
 
     let (bytes, default_name) = if is_ims_file(&path) {
-        let ims_info = parse_ims(&path)?;
+        let ims_info = cached_parse_ims(&cache, &path)?;
         let img = ims_info
             .images
             .get(index)
@@ -312,7 +436,7 @@ async fn extract_image(app: tauri::AppHandle, path: String, index: usize) -> Res
 
 /// 导出 IMS 文件中的全部子图到指定目录
 #[tauri::command]
-async fn extract_all(app: tauri::AppHandle, path: String) -> Result<Vec<String>, String> {
+async fn extract_all(app: tauri::AppHandle, path: String, cache: tauri::State<'_, ImsCache>) -> Result<Vec<String>, String> {
     use tauri_plugin_dialog::DialogExt;
 
     if !is_ims_file(&path) {
@@ -330,7 +454,7 @@ async fn extract_all(app: tauri::AppHandle, path: String) -> Result<Vec<String>,
     }
 
     let out_dir = dir.unwrap().to_string();
-    let ims_info = parse_ims(&path)?;
+    let ims_info = cached_parse_ims(&cache, &path)?;
     let mut saved_paths = Vec::new();
 
     for img in &ims_info.images {
@@ -673,6 +797,8 @@ pub fn run(launch_file: Option<String>) {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(LaunchFile(launch_file))
+        .manage(ImsCache(Mutex::new(HashMap::new())))
+        .manage(FolderScanState::new())
         .invoke_handler(tauri::generate_handler![
             open_file,
             save_ims,

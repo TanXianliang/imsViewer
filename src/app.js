@@ -69,6 +69,7 @@ function init() {
   setupThumbDrag();
   setupFolderBar();
   setupWindowControls();
+
   window.addEventListener('resize', () => {
     setupCanvasSize();
     if (state.isFitMode && state.imgObj) {
