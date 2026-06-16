@@ -120,31 +120,51 @@ fn natord_compare(a: &str, b: &str) -> std::cmp::Ordering {
     a_chars.len().cmp(&b_chars.len())
 }
 
-/// 获取文件夹列表。通过 mtime 自动检测目录变更，过期则重新扫描。
+/// 获取文件夹列表。缓存命中直接返回，首次扫描并缓存。
 fn get_or_scan_folder(
     parent_dir: &str,
     state: &FolderScanState,
 ) -> Vec<FolderEntry> {
-    let current_mtime = std::fs::metadata(parent_dir)
+    {
+        let cache = state.cache.lock().unwrap();
+        if let Some((_mtime, list)) = cache.get(parent_dir) {
+            return list.clone();
+        }
+    }
+    let list = do_scan_dir(parent_dir);
+    let mtime = std::fs::metadata(parent_dir)
+        .and_then(|m| m.modified())
+        .ok();
+    let _ = mtime.map(|mt| {
+        state.cache.lock().unwrap().insert(parent_dir.to_string(), (mt, list.clone()))
+    });
+    list
+}
+
+/// 检查目录是否变更，如有变更则重新扫描并更新缓存。
+/// 前端在切换文件前调用，确保导航列表始终反映最新的目录内容。
+#[tauri::command]
+fn refresh_folder(dir: String, state: tauri::State<'_, FolderScanState>) -> Result<Vec<FolderEntry>, String> {
+    let current_mtime = std::fs::metadata(&dir)
         .and_then(|m| m.modified())
         .ok();
 
-    // 缓存命中 + mtime 未变 → 直接返回
+    // 检查 mtime 是否变更
     if let Some(mtime) = current_mtime {
         let cache = state.cache.lock().unwrap();
-        if let Some((cached_mtime, list)) = cache.get(parent_dir) {
+        if let Some((cached_mtime, list)) = cache.get(&dir) {
             if *cached_mtime == mtime {
-                return list.clone();
+                return Ok(list.clone()); // 未变更，直接返回
             }
         }
     }
 
-    // 缓存缺失、mtime 变更或无权限获取 mtime → 重新扫描
-    let list = do_scan_dir(parent_dir);
-    if let Some(mtime) = current_mtime {
-        state.cache.lock().unwrap().insert(parent_dir.to_string(), (mtime, list.clone()));
+    // 有变更或首次 → 重新扫描
+    let list = do_scan_dir(&dir);
+    if let Some(mtime) = std::fs::metadata(&dir).and_then(|m| m.modified()).ok() {
+        state.cache.lock().unwrap().insert(dir, (mtime, list.clone()));
     }
-    list
+    Ok(list)
 }
 
 // ============================================================
@@ -823,6 +843,7 @@ pub fn run(launch_file: Option<String>) {
             start_batch_upgrade,
             register_file_associations,
             get_launch_file,
+            refresh_folder,
         ])
         .run(tauri::generate_context!())
         .expect("启动 imsViewer 失败");
