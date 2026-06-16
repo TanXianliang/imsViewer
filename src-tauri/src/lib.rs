@@ -11,6 +11,7 @@ use base64::Engine;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
+use std::time::SystemTime;
 use tauri::Emitter;
 
 mod ims;
@@ -23,9 +24,10 @@ use ims_pack::{pack_ims, scan_multiple_folders, compute_output_path, upgrade_ims
 /// 键为文件路径，值为最近一次解析结果。
 pub struct ImsCache(pub Mutex<HashMap<String, ims::ImsFileInfo>>);
 
-/// 文件夹扫描缓存：目录 → 文件列表（仅文件名，无 metadata，file_size 为 0）
+/// 文件夹扫描缓存：目录 → (扫描时的目录 mtime, 文件列表)
+/// 每次命中时校验 mtime，目录有变更则自动重新扫描。
 pub struct FolderScanState {
-    cache: Mutex<HashMap<String, Vec<FolderEntry>>>,
+    cache: Mutex<HashMap<String, (SystemTime, Vec<FolderEntry>)>>,
 }
 
 impl FolderScanState {
@@ -118,21 +120,30 @@ fn natord_compare(a: &str, b: &str) -> std::cmp::Ordering {
     a_chars.len().cmp(&b_chars.len())
 }
 
-/// 获取文件夹列表。缓存命中 → 同步返回。首次 → 同步扫描 + 缓存（无 metadata，极快）。
+/// 获取文件夹列表。通过 mtime 自动检测目录变更，过期则重新扫描。
 fn get_or_scan_folder(
     parent_dir: &str,
     state: &FolderScanState,
 ) -> Vec<FolderEntry> {
-    {
+    let current_mtime = std::fs::metadata(parent_dir)
+        .and_then(|m| m.modified())
+        .ok();
+
+    // 缓存命中 + mtime 未变 → 直接返回
+    if let Some(mtime) = current_mtime {
         let cache = state.cache.lock().unwrap();
-        if let Some(list) = cache.get(parent_dir) {
-            return list.clone();
+        if let Some((cached_mtime, list)) = cache.get(parent_dir) {
+            if *cached_mtime == mtime {
+                return list.clone();
+            }
         }
     }
 
-    // 首次：同步扫描（只列文件名，不调 metadata），SMB 上也可接受
+    // 缓存缺失、mtime 变更或无权限获取 mtime → 重新扫描
     let list = do_scan_dir(parent_dir);
-    state.cache.lock().unwrap().insert(parent_dir.to_string(), list.clone());
+    if let Some(mtime) = current_mtime {
+        state.cache.lock().unwrap().insert(parent_dir.to_string(), (mtime, list.clone()));
+    }
     list
 }
 
