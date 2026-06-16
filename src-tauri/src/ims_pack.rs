@@ -247,13 +247,21 @@ pub fn scan_and_group(input_folder: &str, max_depth: u32) -> Result<Vec<ImageGro
     // 筛选有效组（有封面 + 有子图）
     let mut result: Vec<ImageGroup> = Vec::new();
     for (base_name, (cover_opt, mut sub_images, source_dir_opt)) in groups {
-        let cover = match cover_opt {
-            Some(c) => c,
-            None => continue,
-        };
         if sub_images.is_empty() {
             continue;
         }
+        let cover = match cover_opt {
+            Some(c) => c,
+            None => {
+                // 无封面时，尝试用 00001 号子图替代
+                if let Some(pos) = sub_images.iter().position(|(seq, _)| *seq == 1) {
+                    let (_, cover_path) = sub_images.remove(pos);
+                    cover_path
+                } else {
+                    continue;
+                }
+            }
+        };
         sub_images.sort_by_key(|(seq, _)| *seq);
 
         let raw_ext = cover
