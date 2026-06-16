@@ -459,6 +459,32 @@ async function openFile(filepath) {
   }
 }
 
+// 关闭当前文件
+async function closeCurrentFile() {
+  if (state.editMode) await exitEditMode(false);
+  state.folderList = [];
+  state.currentFileIdx = -1;
+  state.imsInfo = null;
+  state.subImages = [];
+  state.currentSubIdx = 0;
+  state.imgObj = null;
+  state.scale = 1.0;
+  state.offsetX = 0;
+  state.offsetY = 0;
+  dom.thumbnailList.innerHTML = '';
+  dom.thumbnailHeader.textContent = '子图列表';
+  dom.folderPosition.textContent = '--';
+  dom.statusFilePos.textContent = '未打开文件';
+  dom.statusSubPos.textContent = '--';
+  dom.titleFilename.textContent = '';
+  document.title = 'imsViewer';
+  dom.dropHint.classList.add('visible');
+  dom.ctx.clearRect(0, 0, dom.canvas.width, dom.canvas.height);
+  $('#edit-mode-bar').style.display = 'none';
+  updateFileInfo({ filename: '--', file_type: '--', file_size: 0, is_ims: false });
+  setStatus('已关闭');
+}
+
 async function navigateFile(delta) {
   if (state.editMode || state.folderList.length === 0) return;
   let newIdx = state.currentFileIdx + delta;
@@ -785,6 +811,9 @@ function setupMenuActions() {
       switch (action) {
         case 'open':
           await pickAndOpenFile();
+          break;
+        case 'close-file':
+          closeCurrentFile();
           break;
         case 'export-current':
           exportCurrent();
