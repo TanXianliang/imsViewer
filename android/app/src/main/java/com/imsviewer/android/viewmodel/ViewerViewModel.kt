@@ -32,13 +32,20 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
         persistReadPermission(uri, flags)
         loadJob?.cancel()
         loadJob = viewModelScope.launch {
+            val matchName = _uiState.value.pendingFolderMatchName
             _uiState.update {
                 it.copy(screenState = ScreenState.Loading, errorMessage = null, loadingMessage = "Opening folder")
             }
             runCatching { repository.scanTreeImages(uri) }
                 .onSuccess { sequence ->
-                    val firstUri = sequence.firstOrNull()
-                    if (firstUri == null) {
+                    val targetIndex = if (matchName != null) {
+                        sequence.indexOfFirst { candidate -> repository.displayName(candidate) == matchName }
+                    } else {
+                        -1
+                    }
+                    val resolvedIndex = targetIndex.takeIf { it >= 0 } ?: 0
+                    val targetUri = sequence.getOrNull(resolvedIndex)
+                    if (targetUri == null) {
                         _uiState.update {
                             it.copy(
                                 screenState = ScreenState.Error,
@@ -46,7 +53,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
                             )
                         }
                     } else {
-                        openLoadedUriFromSequence(firstUri, sequence, 0)
+                        openLoadedUriFromSequence(targetUri, sequence, resolvedIndex, showFullScreenLoading = true)
                     }
                 }
                 .onFailure { error ->
@@ -57,6 +64,16 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
                         )
                     }
                 }
+        }
+    }
+
+    fun openUriSequence(uris: List<Uri>, flags: Int = 0) {
+        val sequence = uris.distinct()
+        val firstUri = sequence.firstOrNull() ?: return
+        sequence.forEach { persistReadPermission(it, flags) }
+        loadJob?.cancel()
+        loadJob = viewModelScope.launch {
+            openLoadedUriFromSequence(firstUri, sequence, 0, showFullScreenLoading = true)
         }
     }
 
@@ -75,6 +92,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
                 .onSuccess { image ->
                     val normalizedSequence = sequence.ifEmpty { listOf(uri) }
                     val currentIndex = normalizedSequence.indexOf(uri).takeIf { it >= 0 } ?: 0
+                    val needsFolderGrant = refreshSequence && normalizedSequence.size <= 1
                     _uiState.update {
                         it.copy(
                             screenState = ScreenState.Ready,
@@ -84,6 +102,8 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
                             thumbnails = emptyMap(),
                             isUiVisible = true,
                             isInfoSheetVisible = false,
+                            needsFolderGrant = needsFolderGrant,
+                            pendingFolderMatchName = if (needsFolderGrant) image.fileName else null,
                             errorMessage = null
                         )
                     }
@@ -103,13 +123,27 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
     private fun openUriFromSequence(uri: Uri, sequence: List<Uri>, index: Int) {
         loadJob?.cancel()
         loadJob = viewModelScope.launch {
-            openLoadedUriFromSequence(uri, sequence, index)
+            openLoadedUriFromSequence(uri, sequence, index, showFullScreenLoading = false)
         }
     }
 
-    private suspend fun openLoadedUriFromSequence(uri: Uri, sequence: List<Uri>, index: Int) {
+    private suspend fun openLoadedUriFromSequence(
+        uri: Uri,
+        sequence: List<Uri>,
+        index: Int,
+        showFullScreenLoading: Boolean
+    ) {
         _uiState.update {
-            it.copy(screenState = ScreenState.Loading, errorMessage = null, loadingMessage = "Opening image")
+            if (showFullScreenLoading) {
+                it.copy(
+                    screenState = ScreenState.Loading,
+                    isSwitchingFile = false,
+                    errorMessage = null,
+                    loadingMessage = "Opening image"
+                )
+            } else {
+                it.copy(isSwitchingFile = true, errorMessage = null, loadingMessage = "Opening image")
+            }
         }
         runCatching { repository.open(uri) }
             .onSuccess { image ->
@@ -122,6 +156,9 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
                         thumbnails = emptyMap(),
                         isUiVisible = true,
                         isInfoSheetVisible = false,
+                        isSwitchingFile = false,
+                        needsFolderGrant = false,
+                        pendingFolderMatchName = null,
                         errorMessage = null
                     )
                 }
@@ -129,10 +166,19 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
             }
             .onFailure { error ->
                 _uiState.update {
-                    it.copy(
-                        screenState = ScreenState.Error,
-                        errorMessage = error.message ?: "Failed to open file"
-                    )
+                    val message = error.message ?: "Failed to open file"
+                    if (showFullScreenLoading) {
+                        it.copy(
+                            screenState = ScreenState.Error,
+                            isSwitchingFile = false,
+                            errorMessage = message
+                        )
+                    } else {
+                        it.copy(
+                            isSwitchingFile = false,
+                            errorMessage = message
+                        )
+                    }
                 }
             }
     }

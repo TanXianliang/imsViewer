@@ -48,6 +48,8 @@ class ImageRepository(
         }
     }
 
+    fun displayName(uri: Uri): String = queryFileName(uri)
+
     suspend fun scanSiblingImages(uri: Uri): List<Uri> = withContext(Dispatchers.IO) {
         val documentsResult = runCatching { scanDocumentsProviderSiblings(uri) }.getOrElse { listOf(uri) }
         if (documentsResult.size > 1) return@withContext documentsResult

@@ -102,6 +102,8 @@ fun MainScreen(
                     ViewerScreen(
                         image = image,
                         isUiVisible = state.isUiVisible,
+                        isSwitchingFile = state.isSwitchingFile,
+                        needsFolderGrant = state.needsFolderGrant,
                         fileIndex = state.fileIndex,
                         fileCount = state.fileSequence.size.coerceAtLeast(1),
                         thumbnails = state.thumbnails,
@@ -207,6 +209,8 @@ private fun ErrorState(message: String, onOpenFile: () -> Unit, onOpenFolder: ()
 private fun ViewerScreen(
     image: ViewerImage,
     isUiVisible: Boolean,
+    isSwitchingFile: Boolean,
+    needsFolderGrant: Boolean,
     fileIndex: Int,
     fileCount: Int,
     thumbnails: Map<Int, Bitmap>,
@@ -281,6 +285,46 @@ private fun ViewerScreen(
                         vertical = false,
                         onSubImageSelected = onSubImageSelected
                     )
+                }
+            }
+        }
+
+        AnimatedVisibility(
+            visible = isSwitchingFile,
+            modifier = Modifier.align(Alignment.Center)
+        ) {
+            Surface(
+                color = Color(0xCC111114),
+                shape = androidx.compose.foundation.shape.RoundedCornerShape(6.dp)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                    Text("Loading", color = Color.White, fontSize = 13.sp)
+                }
+            }
+        }
+
+        AnimatedVisibility(
+            visible = needsFolderGrant && isUiVisible,
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 118.dp)
+        ) {
+            Surface(
+                color = Color(0xE61A1A1E),
+                shape = androidx.compose.foundation.shape.RoundedCornerShape(6.dp)
+            ) {
+                Row(
+                    modifier = Modifier.padding(start = 12.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text("Enable folder browsing", color = Color.White, fontSize = 13.sp)
+                    TextButton(onClick = onOpenFolder) {
+                        Text("Grant folder")
+                    }
                 }
             }
         }

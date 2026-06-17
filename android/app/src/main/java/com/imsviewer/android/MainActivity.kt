@@ -72,10 +72,38 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleIncomingIntent(intent: Intent?) {
-        val uri = intent?.data ?: return
-        if (intent.action == Intent.ACTION_VIEW) {
-            viewModel.openUri(uri, intent.flags)
+        if (intent == null) return
+        val uris = extractIncomingUris(intent)
+        if (uris.isEmpty()) return
+
+        if (uris.size > 1) {
+            viewModel.openUriSequence(uris, intent.flags)
+        } else {
+            viewModel.openUri(uris.first(), intent.flags)
         }
+    }
+
+    private fun extractIncomingUris(intent: Intent): List<Uri> {
+        val result = linkedSetOf<Uri>()
+        intent.data?.let(result::add)
+
+        intent.clipData?.let { clipData ->
+            repeat(clipData.itemCount) { index ->
+                clipData.getItemAt(index).uri?.let(result::add)
+            }
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)?.let(result::add)
+            intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java)?.let(result::addAll)
+        } else {
+            @Suppress("DEPRECATION")
+            (intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM))?.let(result::add)
+            @Suppress("DEPRECATION")
+            (intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM))?.let(result::addAll)
+        }
+
+        return result.toList()
     }
 
     private fun requestMediaPermissionIfNeeded() {

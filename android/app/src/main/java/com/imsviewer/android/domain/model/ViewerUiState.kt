@@ -18,6 +18,9 @@ data class ViewerUiState(
     val thumbnails: Map<Int, Bitmap> = emptyMap(),
     val isUiVisible: Boolean = true,
     val isInfoSheetVisible: Boolean = false,
+    val isSwitchingFile: Boolean = false,
+    val needsFolderGrant: Boolean = false,
+    val pendingFolderMatchName: String? = null,
     val errorMessage: String? = null,
     val loadingMessage: String = "Loading"
 )
