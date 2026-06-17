@@ -48,7 +48,30 @@ class ImageRepository(
         }
     }
 
-    fun displayName(uri: Uri): String = queryFileName(uri)
+    fun displayName(uri: Uri): String = runCatching { queryFileName(uri) }
+        .getOrElse { fallbackDisplayName(uri) }
+
+    fun indexInSequence(target: Uri, sequence: List<Uri>): Int {
+        val directIndex = sequence.indexOf(target)
+        if (directIndex >= 0) return directIndex
+
+        val targetDocumentId = documentIdOrNull(target)
+        if (targetDocumentId != null) {
+            val documentIndex = sequence.indexOfFirst { documentIdOrNull(it) == targetDocumentId }
+            if (documentIndex >= 0) return documentIndex
+        }
+
+        val targetMediaId = mediaIdOrNull(target)
+        if (targetMediaId != null) {
+            val mediaIndex = sequence.indexOfFirst { mediaIdOrNull(it) == targetMediaId }
+            if (mediaIndex >= 0) return mediaIndex
+        }
+
+        val targetName = runCatching { queryFileName(target) }.getOrNull() ?: return -1
+        val nameMatches = sequence.withIndex()
+            .filter { (_, uri) -> runCatching { queryFileName(uri) }.getOrNull() == targetName }
+        return nameMatches.singleOrNull()?.index ?: -1
+    }
 
     suspend fun scanSiblingImages(uri: Uri): List<Uri> = withContext(Dispatchers.IO) {
         val documentsResult = runCatching { scanDocumentsProviderSiblings(uri) }.getOrElse { listOf(uri) }
@@ -86,6 +109,21 @@ class ImageRepository(
         val bytes = readAllBytes(current.uri)
         val imageBytes = bytes.copyOfRange(subImage.offset.toInt(), (subImage.offset + subImage.length).toInt())
         decodeBytes(imageBytes, targetMaxSize = 180)
+    }
+
+    suspend fun makeThumbnail(uri: Uri, targetMaxSize: Int = 240): Bitmap = withContext(Dispatchers.IO) {
+        val fileName = queryFileName(uri)
+        val format = detector.detect(resolver, uri, fileName)
+        if (format == ImageFormat.Ims) {
+            val bytes = readAllBytes(uri)
+            val imsFile = imsParser.parse(bytes)
+            val coverIndex = imsFile.entries.indexOfFirst { it.isCover }.takeIf { it >= 0 } ?: 0
+            val entry = imsFile.entries[coverIndex]
+            val imageBytes = bytes.copyOfRange(entry.offset.toInt(), (entry.offset + entry.length).toInt())
+            decodeBytes(imageBytes, targetMaxSize = targetMaxSize)
+        } else {
+            decodeUri(uri, targetMaxSize = targetMaxSize)
+        }
     }
 
     private fun openIms(uri: Uri, fileName: String, sizeBytes: Long, preferredSubImageIndex: Int): ViewerImage {
@@ -249,6 +287,27 @@ class ImageRepository(
         return null
     }
 
+    private fun documentIdOrNull(uri: Uri): String? {
+        return runCatching {
+            if (DocumentsContract.isDocumentUri(context, uri)) {
+                DocumentsContract.getDocumentId(uri)
+            } else {
+                null
+            }
+        }.getOrNull()
+    }
+
+    private fun mediaIdOrNull(uri: Uri): String? {
+        if (uri.authority == "com.android.providers.media.documents") {
+            return documentIdOrNull(uri)?.substringAfter(':', missingDelimiterValue = "")
+                ?.takeIf { it.isNotBlank() }
+        }
+        if (uri.authority == MediaStore.AUTHORITY) {
+            return uri.lastPathSegment?.takeIf { it.isNotBlank() }
+        }
+        return null
+    }
+
     private fun isSupportedFileName(name: String, mime: String?): Boolean {
         val lowerName = name.lowercase(Locale.US)
         return lowerName.endsWith(".ims") ||
@@ -265,10 +324,28 @@ class ImageRepository(
         resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
             if (cursor.moveToFirst()) {
                 val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                if (index >= 0) return cursor.getString(index)
+                if (index >= 0 && !cursor.isNull(index)) return cursor.getString(index)
             }
         }
-        return uri.lastPathSegment?.substringAfterLast('/') ?: "Untitled"
+        return fallbackDisplayName(uri)
+    }
+
+    private fun fallbackDisplayName(uri: Uri): String {
+        val treeName = runCatching { DocumentsContract.getTreeDocumentId(uri) }
+            .getOrNull()
+            ?.substringAfter(':')
+            ?.substringAfterLast('/')
+            ?.takeIf { it.isNotBlank() }
+        if (treeName != null) return treeName
+
+        val documentName = runCatching { DocumentsContract.getDocumentId(uri) }
+            .getOrNull()
+            ?.substringAfter(':')
+            ?.substringAfterLast('/')
+            ?.takeIf { it.isNotBlank() }
+        if (documentName != null) return documentName
+
+        return uri.lastPathSegment?.substringAfterLast('/')?.takeIf { it.isNotBlank() } ?: "Untitled"
     }
 
     private fun querySize(uri: Uri): Long {
@@ -286,7 +363,19 @@ class ImageRepository(
             ?: error("Cannot open input stream")
     }
 
-    private fun decodeUri(uri: Uri): Bitmap {
+    private fun decodeUri(uri: Uri, targetMaxSize: Int? = null): Bitmap {
+        if (targetMaxSize != null) {
+            resolver.openInputStream(uri)?.use { stream ->
+                val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeStream(stream, null, options)
+                options.inSampleSize = calculateInSampleSize(options.outWidth, options.outHeight, targetMaxSize)
+                options.inJustDecodeBounds = false
+                resolver.openInputStream(uri)?.use { decodeStream ->
+                    return BitmapFactory.decodeStream(decodeStream, null, options)
+                        ?: error("Cannot decode image")
+                }
+            }
+        }
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             ImageDecoder.decodeBitmap(ImageDecoder.createSource(resolver, uri)) { decoder, _, _ ->
                 decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE

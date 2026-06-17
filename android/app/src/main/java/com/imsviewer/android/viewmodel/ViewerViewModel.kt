@@ -1,11 +1,14 @@
 package com.imsviewer.android.viewmodel
 
 import android.app.Application
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.imsviewer.android.data.ImageRepository
+import com.imsviewer.android.domain.model.OpenRecord
+import com.imsviewer.android.domain.model.OpenRecordKind
 import com.imsviewer.android.domain.model.ScreenState
 import com.imsviewer.android.domain.model.ViewerUiState
 import kotlinx.coroutines.Job
@@ -17,35 +20,41 @@ import kotlinx.coroutines.launch
 
 class ViewerViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = ImageRepository(application)
+    private val recordsStore = application.getSharedPreferences("open_records", Context.MODE_PRIVATE)
     private val _uiState = MutableStateFlow(ViewerUiState())
     val uiState: StateFlow<ViewerUiState> = _uiState.asStateFlow()
 
     private var loadJob: Job? = null
     private var thumbnailJob: Job? = null
+    private var folderThumbnailJob: Job? = null
+
+    init {
+        _uiState.update {
+            it.copy(
+                fileRecords = loadRecords(OpenRecordKind.File),
+                folderRecords = loadRecords(OpenRecordKind.Folder),
+                networkRecords = loadRecords(OpenRecordKind.Network)
+            )
+        }
+    }
 
     fun openUri(uri: Uri, flags: Int = 0) {
         persistReadPermission(uri, flags)
+        addUriRecord(OpenRecordKind.File, uri)
         openUriInternal(uri, refreshSequence = true)
     }
 
     fun openFolder(uri: Uri, flags: Int = 0) {
         persistReadPermission(uri, flags)
+        addUriRecord(OpenRecordKind.Folder, uri)
         loadJob?.cancel()
         loadJob = viewModelScope.launch {
-            val matchName = _uiState.value.pendingFolderMatchName
             _uiState.update {
                 it.copy(screenState = ScreenState.Loading, errorMessage = null, loadingMessage = "Opening folder")
             }
             runCatching { repository.scanTreeImages(uri) }
                 .onSuccess { sequence ->
-                    val targetIndex = if (matchName != null) {
-                        sequence.indexOfFirst { candidate -> repository.displayName(candidate) == matchName }
-                    } else {
-                        -1
-                    }
-                    val resolvedIndex = targetIndex.takeIf { it >= 0 } ?: 0
-                    val targetUri = sequence.getOrNull(resolvedIndex)
-                    if (targetUri == null) {
+                    if (sequence.isEmpty()) {
                         _uiState.update {
                             it.copy(
                                 screenState = ScreenState.Error,
@@ -53,7 +62,21 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
                             )
                         }
                     } else {
-                        openLoadedUriFromSequence(targetUri, sequence, resolvedIndex, showFullScreenLoading = true)
+                        _uiState.update {
+                            it.copy(
+                                screenState = ScreenState.Folder,
+                                folderTitle = repository.displayName(uri),
+                                folderSequence = sequence,
+                                folderThumbnails = emptyMap(),
+                                fileSequence = sequence,
+                                fileIndex = 0,
+                                isHomeVisible = false,
+                                isInfoSheetVisible = false,
+                                isSwitchingFile = false,
+                                errorMessage = null
+                            )
+                        }
+                        loadFolderThumbnails(sequence)
                     }
                 }
                 .onFailure { error ->
@@ -71,10 +94,92 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
         val sequence = uris.distinct()
         val firstUri = sequence.firstOrNull() ?: return
         sequence.forEach { persistReadPermission(it, flags) }
+        addUriRecord(OpenRecordKind.File, firstUri)
         loadJob?.cancel()
         loadJob = viewModelScope.launch {
             openLoadedUriFromSequence(firstUri, sequence, 0, showFullScreenLoading = true)
         }
+    }
+
+    fun openRecord(record: OpenRecord) {
+        val uri = record.uri?.let(Uri::parse) ?: return
+        when (record.kind) {
+            OpenRecordKind.File -> openUri(uri)
+            OpenRecordKind.Folder -> openFolder(uri)
+            OpenRecordKind.Network -> Unit
+        }
+    }
+
+    fun openFolderImage(index: Int) {
+        val state = _uiState.value
+        val uri = state.folderSequence.getOrNull(index) ?: return
+        openUriFromSequence(uri, state.folderSequence, index)
+    }
+
+    fun showHome() {
+        folderThumbnailJob?.cancel()
+        _uiState.update {
+            it.copy(
+                screenState = ScreenState.Empty,
+                currentImage = null,
+                fileSequence = emptyList(),
+                fileIndex = 0,
+                folderTitle = null,
+                folderSequence = emptyList(),
+                folderThumbnails = emptyMap(),
+                thumbnails = emptyMap(),
+                isHomeVisible = true,
+                isUiVisible = true,
+                isInfoSheetVisible = false,
+                isSwitchingFile = false,
+                errorMessage = null
+            )
+        }
+    }
+
+    fun showFolder() {
+        val state = _uiState.value
+        if (state.folderSequence.isEmpty()) {
+            showHome()
+            return
+        }
+        _uiState.update {
+            it.copy(
+                screenState = ScreenState.Folder,
+                currentImage = null,
+                thumbnails = emptyMap(),
+                isUiVisible = true,
+                isInfoSheetVisible = false,
+                isSwitchingFile = false,
+                errorMessage = null
+            )
+        }
+    }
+
+    fun addNetworkRecord(host: String, path: String) {
+        val normalizedHost = host.trim()
+        val normalizedPath = path.trim().ifBlank { "/" }
+        if (normalizedHost.isBlank()) return
+        val record = OpenRecord(
+            id = "network:$normalizedHost:$normalizedPath",
+            kind = OpenRecordKind.Network,
+            title = normalizedHost,
+            subtitle = normalizedPath,
+            host = normalizedHost,
+            path = normalizedPath
+        )
+        upsertRecord(record)
+    }
+
+    fun deleteRecord(record: OpenRecord) {
+        val records = loadRecords(record.kind).filterNot { it.id == record.id }
+        saveRecords(record.kind, records)
+        publishRecords(record.kind, records)
+    }
+
+    fun clearRecords(kind: OpenRecordKind) {
+        saveRecords(kind, emptyList())
+        publishRecords(kind, emptyList())
     }
 
     private fun openUriInternal(uri: Uri, refreshSequence: Boolean) {
@@ -88,11 +193,12 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
             } else {
                 _uiState.value.fileSequence.ifEmpty { listOf(uri) }
             }
-            runCatching { repository.open(uri) }
+            val normalizedSequence = sequence.ifEmpty { listOf(uri) }
+            val currentIndex = repository.indexInSequence(uri, normalizedSequence).takeIf { it >= 0 } ?: 0
+            val targetUri = normalizedSequence.getOrNull(currentIndex) ?: uri
+
+            runCatching { repository.open(targetUri) }
                 .onSuccess { image ->
-                    val normalizedSequence = sequence.ifEmpty { listOf(uri) }
-                    val currentIndex = normalizedSequence.indexOf(uri).takeIf { it >= 0 } ?: 0
-                    val needsFolderGrant = refreshSequence && normalizedSequence.size <= 1
                     _uiState.update {
                         it.copy(
                             screenState = ScreenState.Ready,
@@ -100,10 +206,9 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
                             fileSequence = normalizedSequence,
                             fileIndex = currentIndex,
                             thumbnails = emptyMap(),
+                            isHomeVisible = false,
                             isUiVisible = true,
                             isInfoSheetVisible = false,
-                            needsFolderGrant = needsFolderGrant,
-                            pendingFolderMatchName = if (needsFolderGrant) image.fileName else null,
                             errorMessage = null
                         )
                     }
@@ -154,11 +259,10 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
                         fileSequence = sequence,
                         fileIndex = index,
                         thumbnails = emptyMap(),
-                        isUiVisible = true,
+                        isHomeVisible = false,
+                        isUiVisible = if (showFullScreenLoading) true else it.isUiVisible,
                         isInfoSheetVisible = false,
                         isSwitchingFile = false,
-                        needsFolderGrant = false,
-                        pendingFolderMatchName = null,
                         errorMessage = null
                     )
                 }
@@ -270,6 +374,83 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    private fun addUriRecord(kind: OpenRecordKind, uri: Uri) {
+        val title = runCatching { repository.displayName(uri) }.getOrDefault(uri.lastPathSegment ?: "Untitled")
+        val record = OpenRecord(
+            id = "${kind.name}:${uri}",
+            kind = kind,
+            title = title,
+            subtitle = uri.toString(),
+            uri = uri.toString()
+        )
+        upsertRecord(record)
+    }
+
+    private fun upsertRecord(record: OpenRecord) {
+        val records = loadRecords(record.kind)
+            .filterNot { it.id == record.id }
+            .let { listOf(record.copy(updatedAt = System.currentTimeMillis())) + it }
+            .take(MaxRecords)
+        saveRecords(record.kind, records)
+        publishRecords(record.kind, records)
+    }
+
+    private fun publishRecords(kind: OpenRecordKind, records: List<OpenRecord>) {
+        _uiState.update {
+            when (kind) {
+                OpenRecordKind.File -> it.copy(fileRecords = records)
+                OpenRecordKind.Folder -> it.copy(folderRecords = records)
+                OpenRecordKind.Network -> it.copy(networkRecords = records)
+            }
+        }
+    }
+
+    private fun loadRecords(kind: OpenRecordKind): List<OpenRecord> {
+        return recordsStore.getStringSet(kind.preferenceKey, emptySet()).orEmpty()
+            .mapNotNull { decodeRecord(kind, it) }
+            .sortedByDescending { it.updatedAt }
+    }
+
+    private fun saveRecords(kind: OpenRecordKind, records: List<OpenRecord>) {
+        recordsStore.edit()
+            .putStringSet(kind.preferenceKey, records.map(::encodeRecord).toSet())
+            .apply()
+    }
+
+    private fun encodeRecord(record: OpenRecord): String {
+        return listOf(
+            record.id,
+            record.title,
+            record.subtitle,
+            record.uri.orEmpty(),
+            record.host.orEmpty(),
+            record.path.orEmpty(),
+            record.updatedAt.toString()
+        ).joinToString(separator = "\u001F") { it.replace("\u001F", " ") }
+    }
+
+    private fun decodeRecord(kind: OpenRecordKind, value: String): OpenRecord? {
+        val parts = value.split("\u001F")
+        if (parts.size < 7) return null
+        return OpenRecord(
+            id = parts[0],
+            kind = kind,
+            title = parts[1],
+            subtitle = parts[2],
+            uri = parts[3].ifBlank { null },
+            host = parts[4].ifBlank { null },
+            path = parts[5].ifBlank { null },
+            updatedAt = parts[6].toLongOrNull() ?: 0L
+        )
+    }
+
+    private val OpenRecordKind.preferenceKey: String
+        get() = when (this) {
+            OpenRecordKind.File -> "files"
+            OpenRecordKind.Folder -> "folders"
+            OpenRecordKind.Network -> "networks"
+        }
+
     private fun loadThumbnails(image: com.imsviewer.android.domain.model.ViewerImage) {
         val entries = image.imsFile?.entries.orEmpty()
         if (entries.size <= 1) return
@@ -286,5 +467,24 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
                     }
             }
         }
+    }
+
+    private fun loadFolderThumbnails(sequence: List<Uri>) {
+        folderThumbnailJob?.cancel()
+        folderThumbnailJob = viewModelScope.launch {
+            sequence.forEach { uri ->
+                if (_uiState.value.folderThumbnails.containsKey(uri)) return@forEach
+                runCatching { repository.makeThumbnail(uri) }
+                    .onSuccess { bitmap ->
+                        _uiState.update { state ->
+                            state.copy(folderThumbnails = state.folderThumbnails + (uri to bitmap))
+                        }
+                    }
+            }
+        }
+    }
+
+    private companion object {
+        const val MaxRecords = 30
     }
 }

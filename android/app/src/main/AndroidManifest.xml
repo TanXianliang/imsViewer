@@ -7,6 +7,8 @@
 
     <application
         android:allowBackup="true"
+        android:icon="@mipmap/imsviewer_icon"
+        android:roundIcon="@mipmap/imsviewer_icon"
         android:label="imsViewer"
         android:theme="@style/Theme.ImsViewer">
         <activity

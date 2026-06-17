@@ -27,11 +27,24 @@ import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.itemsIndexed
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.activity.compose.BackHandler
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.FolderOpen
+import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.MoreVert
+import androidx.compose.material.icons.outlined.PhotoLibrary
+import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.Button
@@ -41,14 +54,17 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TextField
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -70,6 +86,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.imsviewer.android.domain.model.OpenRecord
+import com.imsviewer.android.domain.model.OpenRecordKind
 import com.imsviewer.android.domain.model.ScreenState
 import com.imsviewer.android.domain.model.ViewerImage
 import com.imsviewer.android.util.SizeFormatter
@@ -89,27 +107,52 @@ fun MainScreen(
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         when (state.screenState) {
-            ScreenState.Empty -> EmptyState(onOpenFile, onOpenFolder)
+            ScreenState.Empty -> HomeScreen(
+                fileRecords = state.fileRecords,
+                folderRecords = state.folderRecords,
+                networkRecords = state.networkRecords,
+                onOpenFile = onOpenFile,
+                onOpenFolder = onOpenFolder,
+                onOpenRecord = viewModel::openRecord,
+                onDeleteRecord = viewModel::deleteRecord,
+                onClearRecords = viewModel::clearRecords,
+                onAddNetwork = viewModel::addNetworkRecord
+            )
+            ScreenState.Folder -> {
+                BackHandler(onBack = viewModel::showHome)
+                FolderGridScreen(
+                    title = state.folderTitle ?: "Folder",
+                    uris = state.folderSequence,
+                    thumbnails = state.folderThumbnails,
+                    selectedIndex = state.fileIndex,
+                    onHome = viewModel::showHome,
+                    onOpenImage = viewModel::openFolderImage
+                )
+            }
             ScreenState.Loading -> LoadingState(state.loadingMessage)
             ScreenState.Error -> ErrorState(
                 message = state.errorMessage ?: "Failed to open file",
-                onOpenFile = onOpenFile,
-                onOpenFolder = onOpenFolder
+                onHome = viewModel::showHome
             )
             ScreenState.Ready -> {
                 val image = state.currentImage
                 if (image != null) {
+                    BackHandler(
+                        onBack = if (state.folderSequence.isNotEmpty()) {
+                            viewModel::showFolder
+                        } else {
+                            viewModel::showHome
+                        }
+                    )
                     ViewerScreen(
                         image = image,
                         isUiVisible = state.isUiVisible,
                         isSwitchingFile = state.isSwitchingFile,
-                        needsFolderGrant = state.needsFolderGrant,
                         fileIndex = state.fileIndex,
                         fileCount = state.fileSequence.size.coerceAtLeast(1),
                         thumbnails = state.thumbnails,
                         onToggleChrome = viewModel::toggleChrome,
-                        onOpenFile = onOpenFile,
-                        onOpenFolder = onOpenFolder,
+                        onHome = if (state.folderSequence.isNotEmpty()) viewModel::showFolder else viewModel::showHome,
                         onShowInfo = viewModel::showInfoSheet,
                         onShare = {
                             viewModel.shareIntent()?.let(onShare)
@@ -151,24 +194,198 @@ fun MainScreen(
 }
 
 @Composable
-private fun EmptyState(onOpenFile: () -> Unit, onOpenFolder: () -> Unit) {
+private fun FolderGridScreen(
+    title: String,
+    uris: List<android.net.Uri>,
+    thumbnails: Map<android.net.Uri, Bitmap>,
+    selectedIndex: Int,
+    onHome: () -> Unit,
+    onOpenImage: (Int) -> Unit
+) {
+    val gridState = rememberLazyGridState()
+    LaunchedEffect(selectedIndex, uris.size) {
+        if (selectedIndex in uris.indices) {
+            gridState.scrollToItem(selectedIndex)
+        }
+    }
+
     Column(
-        modifier = Modifier.fillMaxSize().padding(24.dp),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF0E0E11))
+            .windowInsetsPadding(WindowInsets.statusBars)
     ) {
-        Text("imsViewer", color = Color.White, fontSize = 28.sp)
-        Spacer(Modifier.height(10.dp))
-        Text("Open an IMS or image file to start.", color = Color(0xFFB8B8B8))
-        Spacer(Modifier.height(20.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Button(onClick = onOpenFile) {
-                Text("Open file")
+        Row(
+            modifier = Modifier.fillMaxWidth().height(56.dp).padding(start = 8.dp, end = 16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onHome) {
+                Icon(Icons.Outlined.Home, contentDescription = "Home", tint = Color.White)
             }
-            Button(onClick = onOpenFolder) {
-                Text("Open folder")
+            Text(
+                text = title,
+                color = Color.White,
+                fontSize = 20.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            Text("${uris.size}", color = Color(0xFFB8B8B8), fontSize = 13.sp)
+        }
+        LazyVerticalGrid(
+            columns = GridCells.Adaptive(112.dp),
+            modifier = Modifier.fillMaxSize(),
+            state = gridState,
+            contentPadding = PaddingValues(10.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            itemsIndexed(uris, key = { _, uri -> uri.toString() }) { index, uri ->
+                FolderGridItem(
+                    index = index,
+                    uri = uri,
+                    bitmap = thumbnails[uri],
+                    selected = index == selectedIndex,
+                    onClick = { onOpenImage(index) }
+                )
             }
         }
+    }
+}
+
+@Composable
+private fun FolderGridItem(
+    index: Int,
+    uri: android.net.Uri,
+    bitmap: Bitmap?,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f)
+                .background(Color(0xFF1D1D22))
+                .border(if (selected) 2.dp else 1.dp, if (selected) Color(0xFF7CC7FF) else Color(0xFF333338)),
+            contentAlignment = Alignment.Center
+        ) {
+            if (bitmap != null) {
+                Image(
+                    bitmap = bitmap.asImageBitmap(),
+                    contentDescription = "Image ${index + 1}",
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
+                )
+            } else {
+                CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
+            }
+        }
+        Spacer(Modifier.height(5.dp))
+        Text(
+            text = uri.lastPathSegment?.substringAfterLast('/') ?: "Image ${index + 1}",
+            color = Color(0xFFD8D8DC),
+            fontSize = 12.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+@Composable
+private fun HomeScreen(
+    fileRecords: List<OpenRecord>,
+    folderRecords: List<OpenRecord>,
+    networkRecords: List<OpenRecord>,
+    onOpenFile: () -> Unit,
+    onOpenFolder: () -> Unit,
+    onOpenRecord: (OpenRecord) -> Unit,
+    onDeleteRecord: (OpenRecord) -> Unit,
+    onClearRecords: (OpenRecordKind) -> Unit,
+    onAddNetwork: (String, String) -> Unit
+) {
+    var selectedTab by remember { mutableIntStateOf(0) }
+    var isSettingsVisible by remember { mutableStateOf(false) }
+    val tabs = listOf("Open File", "Open Folder", "Open Network")
+    val kinds = listOf(OpenRecordKind.File, OpenRecordKind.Folder, OpenRecordKind.Network)
+    val records = when (selectedTab) {
+        0 -> fileRecords
+        1 -> folderRecords
+        else -> networkRecords
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF0E0E11))
+            .windowInsetsPadding(WindowInsets.statusBars)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().height(56.dp).padding(start = 20.dp, end = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("imsViewer", color = Color.White, fontSize = 22.sp, modifier = Modifier.weight(1f))
+            IconButton(onClick = { isSettingsVisible = true }) {
+                Icon(Icons.Outlined.Settings, contentDescription = "Settings", tint = Color.White)
+            }
+        }
+
+        TabRow(
+            selectedTabIndex = selectedTab,
+            containerColor = Color(0xFF151519),
+            contentColor = Color.White
+        ) {
+            tabs.forEachIndexed { index, title ->
+                Tab(
+                    selected = selectedTab == index,
+                    onClick = { selectedTab = index },
+                    text = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                )
+            }
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            when (selectedTab) {
+                0 -> Button(onClick = onOpenFile, modifier = Modifier.weight(1f)) {
+                    Icon(Icons.Outlined.PhotoLibrary, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Open file")
+                }
+                1 -> Button(onClick = onOpenFolder, modifier = Modifier.weight(1f)) {
+                    Icon(Icons.Outlined.FolderOpen, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Open folder")
+                }
+                else -> Button(onClick = { isSettingsVisible = true }, modifier = Modifier.weight(1f)) {
+                    Icon(Icons.Outlined.Add, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Add network")
+                }
+            }
+        }
+
+        RecordList(
+            records = records,
+            kind = kinds[selectedTab],
+            onOpenRecord = onOpenRecord,
+            onDeleteRecord = onDeleteRecord
+        )
+    }
+
+    if (isSettingsVisible) {
+        HomeSettingsSheet(
+            selectedKind = kinds[selectedTab],
+            onDismiss = { isSettingsVisible = false },
+            onAddNetwork = onAddNetwork,
+            onClearRecords = onClearRecords
+        )
     }
 }
 
@@ -186,7 +403,7 @@ private fun LoadingState(message: String) {
 }
 
 @Composable
-private fun ErrorState(message: String, onOpenFile: () -> Unit, onOpenFolder: () -> Unit) {
+private fun ErrorState(message: String, onHome: () -> Unit) {
     Column(
         modifier = Modifier.fillMaxSize().padding(24.dp),
         verticalArrangement = Arrangement.Center,
@@ -194,13 +411,152 @@ private fun ErrorState(message: String, onOpenFile: () -> Unit, onOpenFolder: ()
     ) {
         Text(message, color = Color.White)
         Spacer(Modifier.height(16.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Button(onClick = onOpenFile) {
-                Text("Choose file")
+        Button(onClick = onHome) {
+            Text("Back home")
+        }
+    }
+}
+
+@Composable
+private fun RecordList(
+    records: List<OpenRecord>,
+    kind: OpenRecordKind,
+    onOpenRecord: (OpenRecord) -> Unit,
+    onDeleteRecord: (OpenRecord) -> Unit
+) {
+    if (records.isEmpty()) {
+        Column(
+            modifier = Modifier.fillMaxSize().padding(28.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                text = when (kind) {
+                    OpenRecordKind.File -> "No file records"
+                    OpenRecordKind.Folder -> "No folder records"
+                    OpenRecordKind.Network -> "No network records"
+                },
+                color = Color.White,
+                fontSize = 18.sp
+            )
+            Spacer(Modifier.height(8.dp))
+            Text("Records will appear here after use.", color = Color(0xFF9A9AA0), fontSize = 13.sp)
+        }
+        return
+    }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        items(records, key = { it.id }) { record ->
+            RecordRow(
+                record = record,
+                onOpen = { onOpenRecord(record) },
+                onDelete = { onDeleteRecord(record) }
+            )
+        }
+    }
+}
+
+@Composable
+private fun RecordRow(record: OpenRecord, onOpen: () -> Unit, onDelete: () -> Unit) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = Color(0xFF19191E),
+        shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().clickable(onClick = onOpen).padding(start = 14.dp, end = 4.dp, top = 10.dp, bottom = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(record.title, color = Color.White, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Spacer(Modifier.height(3.dp))
+                Text(record.subtitle, color = Color(0xFF9A9AA0), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            Button(onClick = onOpenFolder) {
-                Text("Choose folder")
+            if (record.kind == OpenRecordKind.Network) {
+                IconButton(onClick = onOpen) {
+                    Icon(Icons.Outlined.MoreVert, contentDescription = "Network settings", tint = Color.White)
+                }
             }
+            IconButton(onClick = onDelete) {
+                Icon(Icons.Outlined.Delete, contentDescription = "Delete", tint = Color.White)
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun HomeSettingsSheet(
+    selectedKind: OpenRecordKind,
+    onDismiss: () -> Unit,
+    onAddNetwork: (String, String) -> Unit,
+    onClearRecords: (OpenRecordKind) -> Unit
+) {
+    var host by remember { mutableStateOf("") }
+    var path by remember { mutableStateOf("/") }
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        dragHandle = { BottomSheetDefaults.DragHandle() },
+        containerColor = Color(0xFF17171B)
+    ) {
+        Column(Modifier.fillMaxWidth().padding(20.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Settings", color = Color.White, fontSize = 20.sp, modifier = Modifier.weight(1f))
+                IconButton(onClick = onDismiss) {
+                    Icon(Icons.Outlined.Close, contentDescription = "Close", tint = Color.White)
+                }
+            }
+            if (selectedKind == OpenRecordKind.Network) {
+                TextField(
+                    value = host,
+                    onValueChange = { host = it },
+                    label = { Text("Host") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(10.dp))
+                TextField(
+                    value = path,
+                    onValueChange = { path = it },
+                    label = { Text("Remote path") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(12.dp))
+                Button(
+                    onClick = {
+                        onAddNetwork(host, path)
+                        onDismiss()
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Add network record")
+                }
+                Spacer(Modifier.height(14.dp))
+            }
+            TextButton(
+                onClick = {
+                    onClearRecords(selectedKind)
+                    onDismiss()
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = when (selectedKind) {
+                        OpenRecordKind.File -> "Clear file records"
+                        OpenRecordKind.Folder -> "Clear folder records"
+                        OpenRecordKind.Network -> "Clear network records"
+                    }
+                )
+            }
+            Spacer(Modifier.height(20.dp))
         }
     }
 }
@@ -210,13 +566,11 @@ private fun ViewerScreen(
     image: ViewerImage,
     isUiVisible: Boolean,
     isSwitchingFile: Boolean,
-    needsFolderGrant: Boolean,
     fileIndex: Int,
     fileCount: Int,
     thumbnails: Map<Int, Bitmap>,
     onToggleChrome: () -> Unit,
-    onOpenFile: () -> Unit,
-    onOpenFolder: () -> Unit,
+    onHome: () -> Unit,
     onShowInfo: () -> Unit,
     onShare: () -> Unit,
     onSubImageSelected: (Int) -> Unit,
@@ -233,8 +587,9 @@ private fun ViewerScreen(
                 AnimatedVisibility(visible = isUiVisible) {
                     SideChrome(
                         image = image,
-                        onOpenFile = onOpenFile,
-                        onOpenFolder = onOpenFolder,
+                        onHome = onHome,
+                        fileIndex = fileIndex,
+                        fileCount = fileCount,
                         onShowInfo = onShowInfo,
                         onShare = onShare,
                         thumbnails = thumbnails,
@@ -265,7 +620,7 @@ private fun ViewerScreen(
                 visible = isUiVisible,
                 modifier = Modifier.align(Alignment.TopCenter)
             ) {
-                TopChrome(image.fileName, onOpenFile, onOpenFolder)
+                TopChrome(image.fileName, onHome)
             }
             AnimatedVisibility(
                 visible = isUiVisible,
@@ -304,27 +659,6 @@ private fun ViewerScreen(
                 ) {
                     CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
                     Text("Loading", color = Color.White, fontSize = 13.sp)
-                }
-            }
-        }
-
-        AnimatedVisibility(
-            visible = needsFolderGrant && isUiVisible,
-            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 118.dp)
-        ) {
-            Surface(
-                color = Color(0xE61A1A1E),
-                shape = androidx.compose.foundation.shape.RoundedCornerShape(6.dp)
-            ) {
-                Row(
-                    modifier = Modifier.padding(start = 12.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Text("Enable folder browsing", color = Color.White, fontSize = 13.sp)
-                    TextButton(onClick = onOpenFolder) {
-                        Text("Grant folder")
-                    }
                 }
             }
         }
@@ -580,7 +914,7 @@ private fun clampOffset(
 }
 
 @Composable
-private fun TopChrome(fileName: String, onOpenFile: () -> Unit, onOpenFolder: () -> Unit) {
+private fun TopChrome(fileName: String, onHome: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -594,8 +928,9 @@ private fun TopChrome(fileName: String, onOpenFile: () -> Unit, onOpenFolder: ()
                 .padding(horizontal = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            TextButton(onClick = onOpenFile) { Text("Open") }
-            TextButton(onClick = onOpenFolder) { Text("Folder") }
+            IconButton(onClick = onHome) {
+                Icon(Icons.Outlined.Home, contentDescription = "Home", tint = Color.White)
+            }
             Text(
                 text = fileName,
                 color = Color.White,
@@ -622,21 +957,21 @@ private fun BottomChrome(
             .padding(horizontal = 12.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(
-            text = "${fileIndex + 1} / $fileCount",
-            color = Color.White,
-            fontSize = 13.sp
-        )
-        Spacer(Modifier.weight(1f))
-        if (image.subImageCount > 1) {
-            Text(
-                text = "Sub ${image.subImageIndex + 1} / ${image.subImageCount}",
-                color = Color(0xFFCCCCCC),
-                fontSize = 13.sp,
-                modifier = Modifier.padding(end = 12.dp)
-            )
+        val status = buildString {
+            append("${fileIndex + 1} / $fileCount")
+            if (image.subImageCount > 1) {
+                append("  ·  Sub ${image.subImageIndex + 1} / ${image.subImageCount}")
+            }
+            append("  ·  ${image.width} x ${image.height}")
         }
-        Text("${image.width} x ${image.height}", color = Color(0xFFCCCCCC), fontSize = 13.sp)
+        Text(
+            text = status,
+            color = Color.White,
+            fontSize = 13.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
         IconButton(onClick = onShowInfo) {
             Icon(Icons.Outlined.Info, contentDescription = "Info", tint = Color.White)
         }
@@ -649,8 +984,9 @@ private fun BottomChrome(
 @Composable
 private fun SideChrome(
     image: ViewerImage,
-    onOpenFile: () -> Unit,
-    onOpenFolder: () -> Unit,
+    onHome: () -> Unit,
+    fileIndex: Int,
+    fileCount: Int,
     onShowInfo: () -> Unit,
     onShare: () -> Unit,
     thumbnails: Map<Int, Bitmap>,
@@ -664,8 +1000,11 @@ private fun SideChrome(
             .padding(8.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        TextButton(onClick = onOpenFile) { Text("Open") }
-        TextButton(onClick = onOpenFolder) { Text("Folder") }
+        Row {
+            IconButton(onClick = onHome) {
+                Icon(Icons.Outlined.Home, contentDescription = "Home", tint = Color.White)
+            }
+        }
         ThumbnailStrip(
             image = image,
             thumbnails = thumbnails,
@@ -674,10 +1013,17 @@ private fun SideChrome(
         )
         Spacer(Modifier.weight(1f))
         Text(
-            text = if (image.subImageCount > 1) "${image.subImageIndex + 1} / ${image.subImageCount}" else "1 / 1",
+            text = "${fileIndex + 1} / $fileCount",
             color = Color.White,
             fontSize = 13.sp
         )
+        if (image.subImageCount > 1) {
+            Text(
+                text = "Sub ${image.subImageIndex + 1} / ${image.subImageCount}",
+                color = Color(0xFFCCCCCC),
+                fontSize = 12.sp
+            )
+        }
         Row {
             IconButton(onClick = onShowInfo) {
                 Icon(Icons.Outlined.Info, contentDescription = "Info", tint = Color.White)
@@ -698,10 +1044,18 @@ private fun ThumbnailStrip(
 ) {
     val entries = image.imsFile?.entries.orEmpty()
     if (entries.size <= 1) return
+    val listState = rememberLazyListState()
+
+    LaunchedEffect(image.subImageIndex, entries.size) {
+        if (image.subImageIndex in entries.indices) {
+            listState.animateScrollToItem(image.subImageIndex)
+        }
+    }
 
     if (vertical) {
         LazyColumn(
             modifier = Modifier.fillMaxWidth().fillMaxHeight(0.72f),
+            state = listState,
             contentPadding = PaddingValues(vertical = 4.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
@@ -717,6 +1071,7 @@ private fun ThumbnailStrip(
     } else {
         LazyRow(
             modifier = Modifier.fillMaxWidth().height(74.dp).background(Color(0xCC111114)),
+            state = listState,
             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {

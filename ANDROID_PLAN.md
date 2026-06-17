@@ -83,7 +83,7 @@
 
 ### 4.3 明确不做
 
-- 完整图库首页。
+- 完整图库管理首页。
 - 相册管理、移动、复制、删除、回收站。
 - 图片编辑、裁剪、滤镜、标注。
 - IMS 编辑、重排、保存、批量导出。
@@ -94,17 +94,17 @@
 
 ## 5. 任务状态
 
-说明：以下状态已按用户要求重置，所有开发任务重新从未完成开始记录。已经在代码中推进的内容也暂不勾选，等完成构建和验收后再逐项标记。
+说明：以下状态按当前 Android 首版实现回填；已落地的开发项勾选，仍需补齐或需更多设备/样例验证的项保持未勾选。
 
 ### M0 代码盘点与基线确认
 
 目标：确认 Android 工程能作为首版开发基线。
 
-- [ ] 创建或确认 `android/` 工程目录。
-- [ ] 运行 `android/gradlew.bat :app:assembleDebug`。
-- [ ] 记录包名、minSdk、targetSdk、Compose/Kotlin 版本。
-- [ ] 梳理 `android/app/src` 文件结构。
-- [ ] 建立构建命令备注。
+- [x] 创建或确认 `android/` 工程目录。
+- [x] 运行 `android/gradlew.bat :app:assembleDebug`。
+- [x] 记录包名、minSdk、targetSdk、Compose/Kotlin 版本。
+- [x] 梳理 `android/app/src` 文件结构。
+- [x] 建立构建命令备注。
 
 验收：
 - Debug 构建成功。
@@ -114,12 +114,12 @@
 
 目标：App 可启动，有清晰空状态和基础架构。
 
-- [ ] 建立推荐包结构。
-- [ ] 实现 `MainActivity` + `MainScreen`。
-- [ ] 实现 `ViewerViewModel` 和 `ViewerUiState`。
-- [ ] 实现空状态，提供“打开文件”按钮。
-- [ ] 接入深色主题和基础 Material 3 样式。
-- [ ] 加入基础错误状态组件。
+- [x] 建立推荐包结构。
+- [x] 实现 `MainActivity` + `MainScreen`。
+- [x] 实现 `ViewerViewModel` 和 `ViewerUiState`。
+- [x] 实现空状态，提供“打开文件”按钮。
+- [x] 接入深色主题和基础 Material 3 样式。
+- [x] 加入基础错误状态组件。
 
 验收：
 - 启动后显示空状态。
@@ -130,13 +130,13 @@
 
 目标：能打开普通图片并完成基础查看。
 
-- [ ] 实现 SAF `ACTION_OPEN_DOCUMENT`。
-- [ ] 处理 URI 持久读权限。
-- [ ] 实现 `ImageFormatDetector`。
-- [ ] 实现普通图片 metadata 读取。
-- [ ] 实现图片解码和 `ViewerImage` 状态。
-- [ ] 实现 `ImageCanvas` 适屏绘制。
-- [ ] 实现加载、成功、失败状态流。
+- [x] 实现 SAF `ACTION_OPEN_DOCUMENT`。
+- [x] 处理 URI 持久读权限。
+- [x] 实现 `ImageFormatDetector`。
+- [x] 实现普通图片 metadata 读取。
+- [x] 实现图片解码和 `ViewerImage` 状态。
+- [x] 实现 `ImageCanvas` 适屏绘制。
+- [x] 实现加载、成功、失败状态流。
 
 验收：
 - JPEG/PNG/WebP/AVIF 至少各验证一张。
@@ -147,13 +147,13 @@
 
 目标：普通图片查看体验达到可用标准。
 
-- [ ] 实现 `ViewerTransform` 和 `fitScale` 计算。
-- [ ] 实现单击显示/隐藏 UI。
-- [ ] 实现双指缩放和平移。
-- [ ] 实现放大状态单指拖拽。
-- [ ] 实现双击适屏/放大切换。
-- [ ] 实现偏移 clamp。
-- [ ] 实现横竖屏重新计算合法 transform。
+- [x] 实现 `ViewerTransform` 和 `fitScale` 计算。
+- [x] 实现单击显示/隐藏 UI。
+- [x] 实现双指缩放和平移。
+- [x] 实现放大状态单指拖拽。
+- [x] 实现双击适屏/放大切换。
+- [x] 实现偏移 clamp。
+- [x] 实现横竖屏重新计算合法 transform。
 
 验收：
 - 单击、双击、双指缩放、拖拽符合研究文档手势规范。
@@ -164,13 +164,13 @@
 
 目标：IMS 文件能解析、显示、切换子图。
 
-- [ ] 实现 `ImsFile`、`SubImage`、`ImageFormat`。
-- [ ] 实现 little-endian 字节读取工具。
-- [ ] 实现 `ImsParser`。
-- [ ] 实现 IMS 子图按需读取。
-- [ ] 实现 IMS 子图解码。
+- [x] 实现 `ImsFile`、`SubImage`、`ImageFormat`。
+- [x] 实现 little-endian 字节读取工具。
+- [x] 实现 `ImsParser`。
+- [x] 实现 IMS 子图按需读取。
+- [x] 实现 IMS 子图解码。
 - [ ] 使用 `samples/` 建立解析测试。
-- [ ] 对损坏 IMS 增加错误处理。
+- [x] 对损坏 IMS 增加错误处理。
 
 验收：
 - 样例 IMS 能解析出正确子图数量。
@@ -182,13 +182,13 @@
 
 目标：打开一个文件后可浏览同目录支持格式。
 
-- [ ] 实现 `FileRepository` 同目录扫描。
-- [ ] 过滤 IMS/JPEG/PNG/WebP/AVIF。
+- [x] 实现 `FileRepository` 同目录扫描。
+- [x] 过滤 IMS/JPEG/PNG/WebP/AVIF。
 - [ ] 实现自然排序。
-- [ ] 当前文件定位到序列中。
-- [ ] 实现 `openPreviousFile()` / `openNextFile()`。
-- [ ] 实现适屏状态左右滑切换。
-- [ ] 处理目录不可扫描降级。
+- [x] 当前文件定位到序列中。
+- [x] 实现 `openPreviousFile()` / `openNextFile()`。
+- [x] 实现适屏状态左右滑切换。
+- [x] 处理目录不可扫描降级。
 
 验收：
 - 底部显示 `当前序号 / 总数`。
@@ -201,13 +201,13 @@
 目标：IMS 多子图浏览和元数据查看完整。
 
 - [ ] 实现 `ThumbnailRepository`。
-- [ ] 实现 IMS 子图缩略图异步生成。
-- [ ] 实现竖屏 `ThumbnailStrip`。
-- [ ] 实现横屏侧边缩略图布局。
-- [ ] 实现当前子图高亮和滚动定位。
-- [ ] 实现 `ImageInfoSheet`。
-- [ ] 展示普通图片信息。
-- [ ] 展示 IMS 文件和当前子图信息。
+- [x] 实现 IMS 子图缩略图异步生成。
+- [x] 实现竖屏 `ThumbnailStrip`。
+- [x] 实现横屏侧边缩略图布局。
+- [x] 实现当前子图高亮和滚动定位。
+- [x] 实现 `ImageInfoSheet`。
+- [x] 展示普通图片信息。
+- [x] 展示 IMS 文件和当前子图信息。
 - [ ] 可选实现 URI/SHA-256 复制。
 
 验收：
@@ -221,12 +221,12 @@
 目标：首版体验完整，达到手动验收标准。
 
 - [ ] 完善顶部栏、底部栏、更多菜单。
-- [ ] 实现沉浸模式动画。
-- [ ] 完成横屏布局。
-- [ ] 实现系统 ShareSheet 分享。
-- [ ] 分享普通图片 URI。
-- [ ] IMS 首版分享原文件 URI。
-- [ ] 优化长文件名、省略、按钮间距。
+- [x] 实现沉浸模式动画。
+- [x] 完成横屏布局。
+- [x] 实现系统 ShareSheet 分享。
+- [x] 分享普通图片 URI。
+- [x] IMS 首版分享原文件 URI。
+- [x] 优化长文件名、省略、按钮间距。
 - [ ] 检查小屏和高 DPI 设备布局。
 
 验收：
@@ -239,13 +239,14 @@
 
 目标：生成可验收 APK。
 
-- [ ] 快速切图时取消旧解码任务。
+- [x] 快速切图时取消旧解码任务。
 - [ ] 限制 bitmap/thumbnail 缓存。
 - [ ] 大图降采样和 OOM 防护。
 - [ ] 后台计算 SHA-256。
 - [ ] 增加关键单元测试。
-- [ ] 增加手动验收样例清单。
-- [ ] 运行 debug/release 构建。
+- [x] 增加手动验收样例清单。
+- [x] 运行 debug 构建。
+- [ ] 运行 release 构建。
 - [ ] 生成签名 APK 或 release artifact。
 
 验收：
@@ -301,17 +302,52 @@
 - [ ] 支持远程目录搜索和排序设置。
 - [ ] 支持只在 Wi-Fi 下预取或下载大文件。
 
+### M10 首页、记录与 Folder 缩略图模式
+
+目标：把打开入口从临时空状态升级为可反复使用的首页，并改善目录浏览体验。
+
+- [x] 首页分为 `Open File`、`Open Folder`、`Open Network` 三页。
+- [x] File/Folder 打开后记录历史。
+- [x] Network 支持新增 host/path 记录。
+- [x] 每条记录支持独立删除。
+- [x] 设置入口支持清空当前类型记录。
+- [x] 查看页顶部/侧边入口改为回首页/回目录。
+- [x] Open File 预览页返回手势回首页。
+- [x] Open Folder 目录页返回手势回首页。
+- [x] Open Folder 预览页返回手势回当前目录缩略图页。
+- [x] Open Folder 先显示目录缩略图网格，不再自动打开第一张。
+- [x] 目录缩略图后台逐张加载。
+- [x] 目录缩略图页点击图片后进入现有预览。
+- [x] 从预览返回目录缩略图页时定位到当前图片。
+- [x] Android launcher 图标使用 `src-tauri/icons` 同源资源。
+- [ ] Network 记录支持编辑完整连接配置。
+- [ ] Network 记录点击后进入 SFTP 目录浏览。
+- [ ] Folder 缩略图失败时显示稳定失败占位。
+- [ ] Folder 缩略图缓存增加上限和回收策略。
+- [ ] Folder 大目录加载增加取消、分页或并发限制。
+
+验收：
+- 首页三页入口可切换，File/Folder/Network 记录分别展示。
+- File/Folder 记录可删除，设置可清空当前类型记录。
+- Open Folder 选择目录后先进入缩略图网格。
+- 点击目录缩略图进入预览，返回手势回到原目录位置。
+- Open File 预览页返回手势回首页，不直接退到桌面。
+
 ## 6. 首版实现备注
 
 本轮推进目标：
 - 创建 Android/Compose 工程。
 - 实现 SAF 打开文件。
+- 实现三页首页和 File/Folder/Network 打开记录。
 - 实现普通图片和 IMS 文件解析显示。
+- 实现 Open Folder 目录缩略图模式，后台加载缩略图后再点选预览。
 - 实现首版手势体验：单击显隐 UI、双击缩放、双指缩放、放大拖拽、边界 clamp。
 - 实现 IMS 子图真实缩略图和适屏上下滑循环切换。
 - 实现 SAF 同目录扫描和适屏左右滑切换图片文件。
 - 实现外部“打开方式/分享”多 URI 传入兼容，直接形成 `1/N` 浏览序列。
 - 实现信息面板和系统分享入口。
+- 实现查看页返回首页/目录缩略图的返回手势。
+- Android APK 使用 `src-tauri/icons` 派生的 launcher 图标。
 
 受本地环境影响，构建命令建议：
 
@@ -343,6 +379,9 @@ cd android
 | 手势 | 单击、双击、双指缩放、放大拖拽可用 |
 | IMS | 能显示子图数量，点击缩略图或适屏上下滑循环切换子图 |
 | 文件切换 | 同目录支持格式文件可在适屏状态左右滑切换 |
+| Folder | 打开目录后先显示缩略图网格，点击缩略图进入预览 |
+| 返回 | Open File 预览返回首页，Open Folder 预览返回目录缩略图 |
+| 首页 | File/Folder/Network 三页记录可展示、删除、清空 |
 | 外部传入 | 文件管理器多选分享/打开到 imsViewer 时可形成 `1/N` 序列 |
 | 信息 | 普通图片和 IMS 信息准确，面板可关闭 |
 | 沉浸 | 单击隐藏 UI 后图片区域最大化 |
