@@ -22,6 +22,7 @@ data class ViewerUiState(
     val folderTitle: String? = null,
     val folderSequence: List<Uri> = emptyList(),
     val folderThumbnails: Map<Uri, Bitmap> = emptyMap(),
+    val failedFolderThumbnails: Set<Uri> = emptySet(),
     val isHomeVisible: Boolean = true,
     val thumbnails: Map<Int, Bitmap> = emptyMap(),
     val isUiVisible: Boolean = true,

@@ -68,6 +68,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
                                 folderTitle = repository.displayName(uri),
                                 folderSequence = sequence,
                                 folderThumbnails = emptyMap(),
+                                failedFolderThumbnails = emptySet(),
                                 fileSequence = sequence,
                                 fileIndex = 0,
                                 isHomeVisible = false,
@@ -104,9 +105,46 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
     fun openRecord(record: OpenRecord) {
         val uri = record.uri?.let(Uri::parse) ?: return
         when (record.kind) {
-            OpenRecordKind.File -> openUri(uri)
-            OpenRecordKind.Folder -> openFolder(uri)
+            OpenRecordKind.File -> {
+                persistReadPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                openUriInternal(uri, refreshSequence = true, sourceRecord = record)
+            }
+            OpenRecordKind.Folder -> openFolderFromRecord(record, uri)
             OpenRecordKind.Network -> Unit
+        }
+    }
+
+    private fun openFolderFromRecord(record: OpenRecord, uri: Uri) {
+        persistReadPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        loadJob?.cancel()
+        loadJob = viewModelScope.launch {
+            _uiState.update { it.copy(screenState = ScreenState.Loading, errorMessage = null, loadingMessage = "Opening folder") }
+            runCatching { repository.scanTreeImages(uri) }
+                .onSuccess { sequence ->
+                    if (sequence.isEmpty()) {
+                        showRecordOpenError(record, "No supported IMS or image files in this folder")
+                    } else {
+                        _uiState.update {
+                            it.copy(
+                                screenState = ScreenState.Folder,
+                                folderTitle = record.title,
+                                folderSequence = sequence,
+                                folderThumbnails = emptyMap(),
+                                failedFolderThumbnails = emptySet(),
+                                fileSequence = sequence,
+                                fileIndex = 0,
+                                isHomeVisible = false,
+                                isInfoSheetVisible = false,
+                                isSwitchingFile = false,
+                                errorMessage = null
+                            )
+                        }
+                        loadFolderThumbnails(sequence)
+                    }
+                }
+                .onFailure { error ->
+                    showRecordOpenError(record, error.message ?: "Failed to open folder")
+                }
         }
     }
 
@@ -127,6 +165,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
                 folderTitle = null,
                 folderSequence = emptyList(),
                 folderThumbnails = emptyMap(),
+                failedFolderThumbnails = emptySet(),
                 thumbnails = emptyMap(),
                 isHomeVisible = true,
                 isUiVisible = true,
@@ -171,6 +210,25 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
         upsertRecord(record)
     }
 
+    fun updateNetworkRecord(record: OpenRecord, host: String, path: String) {
+        val normalizedHost = host.trim()
+        val normalizedPath = path.trim().ifBlank { "/" }
+        if (normalizedHost.isBlank()) return
+        val updated = record.copy(
+            id = "network:$normalizedHost:$normalizedPath",
+            title = normalizedHost,
+            subtitle = normalizedPath,
+            host = normalizedHost,
+            path = normalizedPath,
+            uri = null
+        )
+        val records = (listOf(updated.copy(updatedAt = System.currentTimeMillis())) +
+            loadRecords(OpenRecordKind.Network).filterNot { it.id == record.id || it.id == updated.id })
+            .take(MaxRecords)
+        saveRecords(OpenRecordKind.Network, records)
+        publishRecords(OpenRecordKind.Network, records)
+    }
+
     fun deleteRecord(record: OpenRecord) {
         val records = loadRecords(record.kind).filterNot { it.id == record.id }
         saveRecords(record.kind, records)
@@ -182,7 +240,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
         publishRecords(kind, emptyList())
     }
 
-    private fun openUriInternal(uri: Uri, refreshSequence: Boolean) {
+    private fun openUriInternal(uri: Uri, refreshSequence: Boolean, sourceRecord: OpenRecord? = null) {
         loadJob?.cancel()
         loadJob = viewModelScope.launch {
             _uiState.update {
@@ -215,11 +273,16 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
                     loadThumbnails(image)
                 }
                 .onFailure { error ->
-                    _uiState.update {
-                        it.copy(
-                            screenState = ScreenState.Error,
-                            errorMessage = error.message ?: "Failed to open file"
-                        )
+                    val message = error.message ?: "Failed to open file"
+                    if (sourceRecord != null) {
+                        showRecordOpenError(sourceRecord, message)
+                    } else {
+                        _uiState.update {
+                            it.copy(
+                                screenState = ScreenState.Error,
+                                errorMessage = message
+                            )
+                        }
                     }
                 }
         }
@@ -411,6 +474,18 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
             .sortedByDescending { it.updatedAt }
     }
 
+    private fun showRecordOpenError(record: OpenRecord, message: String) {
+        _uiState.update {
+            it.copy(
+                screenState = ScreenState.Empty,
+                currentImage = null,
+                isHomeVisible = true,
+                isSwitchingFile = false,
+                errorMessage = "${record.title}: $message"
+            )
+        }
+    }
+
     private fun saveRecords(kind: OpenRecordKind, records: List<OpenRecord>) {
         recordsStore.edit()
             .putStringSet(kind.preferenceKey, records.map(::encodeRecord).toSet())
@@ -473,18 +548,30 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
         folderThumbnailJob?.cancel()
         folderThumbnailJob = viewModelScope.launch {
             sequence.forEach { uri ->
-                if (_uiState.value.folderThumbnails.containsKey(uri)) return@forEach
+                val state = _uiState.value
+                if (state.folderThumbnails.containsKey(uri) || state.failedFolderThumbnails.contains(uri)) return@forEach
                 runCatching { repository.makeThumbnail(uri) }
                     .onSuccess { bitmap ->
                         _uiState.update { state ->
-                            state.copy(folderThumbnails = state.folderThumbnails + (uri to bitmap))
+                            state.copy(folderThumbnails = trimFolderThumbnailCache(state.folderThumbnails + (uri to bitmap)))
+                        }
+                    }
+                    .onFailure {
+                        _uiState.update { state ->
+                            state.copy(failedFolderThumbnails = state.failedFolderThumbnails + uri)
                         }
                     }
             }
         }
     }
 
+    private fun trimFolderThumbnailCache(cache: Map<Uri, android.graphics.Bitmap>): Map<Uri, android.graphics.Bitmap> {
+        if (cache.size <= MaxFolderThumbnails) return cache
+        return cache.entries.toList().takeLast(MaxFolderThumbnails).associate { it.toPair() }
+    }
+
     private companion object {
         const val MaxRecords = 30
+        const val MaxFolderThumbnails = 160
     }
 }

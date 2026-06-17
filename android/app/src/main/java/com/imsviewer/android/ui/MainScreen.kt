@@ -2,6 +2,9 @@ package com.imsviewer.android.ui
 
 import android.content.Intent
 import android.graphics.Bitmap
+import android.net.Uri
+import java.text.DateFormat
+import java.util.Date
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -116,7 +119,8 @@ fun MainScreen(
                 onOpenRecord = viewModel::openRecord,
                 onDeleteRecord = viewModel::deleteRecord,
                 onClearRecords = viewModel::clearRecords,
-                onAddNetwork = viewModel::addNetworkRecord
+                onAddNetwork = viewModel::addNetworkRecord,
+                onUpdateNetwork = viewModel::updateNetworkRecord
             )
             ScreenState.Folder -> {
                 BackHandler(onBack = viewModel::showHome)
@@ -124,6 +128,7 @@ fun MainScreen(
                     title = state.folderTitle ?: "Folder",
                     uris = state.folderSequence,
                     thumbnails = state.folderThumbnails,
+                    failedThumbnails = state.failedFolderThumbnails,
                     selectedIndex = state.fileIndex,
                     onHome = viewModel::showHome,
                     onOpenImage = viewModel::openFolderImage
@@ -168,7 +173,7 @@ fun MainScreen(
         }
 
         state.errorMessage?.let { message ->
-            if (state.screenState == ScreenState.Ready) {
+            if (state.screenState == ScreenState.Ready || state.screenState == ScreenState.Empty) {
                 Surface(
                     modifier = Modifier.align(Alignment.TopCenter).padding(top = 24.dp),
                     color = Color(0xDD2B1B1B)
@@ -196,8 +201,9 @@ fun MainScreen(
 @Composable
 private fun FolderGridScreen(
     title: String,
-    uris: List<android.net.Uri>,
-    thumbnails: Map<android.net.Uri, Bitmap>,
+    uris: List<Uri>,
+    thumbnails: Map<Uri, Bitmap>,
+    failedThumbnails: Set<Uri>,
     selectedIndex: Int,
     onHome: () -> Unit,
     onOpenImage: (Int) -> Unit
@@ -245,6 +251,7 @@ private fun FolderGridScreen(
                     index = index,
                     uri = uri,
                     bitmap = thumbnails[uri],
+                    failed = uri in failedThumbnails,
                     selected = index == selectedIndex,
                     onClick = { onOpenImage(index) }
                 )
@@ -256,8 +263,9 @@ private fun FolderGridScreen(
 @Composable
 private fun FolderGridItem(
     index: Int,
-    uri: android.net.Uri,
+    uri: Uri,
     bitmap: Bitmap?,
+    failed: Boolean,
     selected: Boolean,
     onClick: () -> Unit
 ) {
@@ -281,6 +289,8 @@ private fun FolderGridItem(
                     modifier = Modifier.fillMaxSize(),
                     contentScale = ContentScale.Crop
                 )
+            } else if (failed) {
+                Text("Failed", color = Color(0xFFB8B8B8), fontSize = 12.sp)
             } else {
                 CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
             }
@@ -306,7 +316,8 @@ private fun HomeScreen(
     onOpenRecord: (OpenRecord) -> Unit,
     onDeleteRecord: (OpenRecord) -> Unit,
     onClearRecords: (OpenRecordKind) -> Unit,
-    onAddNetwork: (String, String) -> Unit
+    onAddNetwork: (String, String) -> Unit,
+    onUpdateNetwork: (OpenRecord, String, String) -> Unit
 ) {
     var selectedTab by remember { mutableIntStateOf(0) }
     var isSettingsVisible by remember { mutableStateOf(false) }
@@ -375,15 +386,18 @@ private fun HomeScreen(
             records = records,
             kind = kinds[selectedTab],
             onOpenRecord = onOpenRecord,
-            onDeleteRecord = onDeleteRecord
+            onDeleteRecord = onDeleteRecord,
+            onUpdateNetwork = onUpdateNetwork
         )
     }
 
     if (isSettingsVisible) {
         HomeSettingsSheet(
             selectedKind = kinds[selectedTab],
+            editRecord = null,
             onDismiss = { isSettingsVisible = false },
             onAddNetwork = onAddNetwork,
+            onUpdateNetwork = onUpdateNetwork,
             onClearRecords = onClearRecords
         )
     }
@@ -422,8 +436,11 @@ private fun RecordList(
     records: List<OpenRecord>,
     kind: OpenRecordKind,
     onOpenRecord: (OpenRecord) -> Unit,
-    onDeleteRecord: (OpenRecord) -> Unit
+    onDeleteRecord: (OpenRecord) -> Unit,
+    onUpdateNetwork: (OpenRecord, String, String) -> Unit
 ) {
+    var editRecord by remember { mutableStateOf<OpenRecord?>(null) }
+
     if (records.isEmpty()) {
         Column(
             modifier = Modifier.fillMaxSize().padding(28.dp),
@@ -454,14 +471,26 @@ private fun RecordList(
             RecordRow(
                 record = record,
                 onOpen = { onOpenRecord(record) },
+                onEdit = { editRecord = record },
                 onDelete = { onDeleteRecord(record) }
             )
         }
     }
+
+    editRecord?.let { record ->
+        HomeSettingsSheet(
+            selectedKind = OpenRecordKind.Network,
+            editRecord = record,
+            onDismiss = { editRecord = null },
+            onAddNetwork = { _, _ -> },
+            onUpdateNetwork = { targetRecord, host, path -> onUpdateNetwork(targetRecord, host, path) },
+            onClearRecords = {}
+        )
+    }
 }
 
 @Composable
-private fun RecordRow(record: OpenRecord, onOpen: () -> Unit, onDelete: () -> Unit) {
+private fun RecordRow(record: OpenRecord, onOpen: () -> Unit, onEdit: () -> Unit, onDelete: () -> Unit) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color = Color(0xFF19191E),
@@ -475,9 +504,11 @@ private fun RecordRow(record: OpenRecord, onOpen: () -> Unit, onDelete: () -> Un
                 Text(record.title, color = Color.White, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Spacer(Modifier.height(3.dp))
                 Text(record.subtitle, color = Color(0xFF9A9AA0), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Spacer(Modifier.height(3.dp))
+                Text(formatRecordTime(record.updatedAt), color = Color(0xFF77777D), fontSize = 11.sp, maxLines = 1)
             }
             if (record.kind == OpenRecordKind.Network) {
-                IconButton(onClick = onOpen) {
+                IconButton(onClick = onEdit) {
                     Icon(Icons.Outlined.MoreVert, contentDescription = "Network settings", tint = Color.White)
                 }
             }
@@ -492,12 +523,14 @@ private fun RecordRow(record: OpenRecord, onOpen: () -> Unit, onDelete: () -> Un
 @Composable
 private fun HomeSettingsSheet(
     selectedKind: OpenRecordKind,
+    editRecord: OpenRecord?,
     onDismiss: () -> Unit,
     onAddNetwork: (String, String) -> Unit,
+    onUpdateNetwork: (OpenRecord, String, String) -> Unit,
     onClearRecords: (OpenRecordKind) -> Unit
 ) {
-    var host by remember { mutableStateOf("") }
-    var path by remember { mutableStateOf("/") }
+    var host by remember(editRecord) { mutableStateOf(editRecord?.host.orEmpty()) }
+    var path by remember(editRecord) { mutableStateOf(editRecord?.path ?: "/") }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     ModalBottomSheet(
@@ -532,33 +565,44 @@ private fun HomeSettingsSheet(
                 Spacer(Modifier.height(12.dp))
                 Button(
                     onClick = {
-                        onAddNetwork(host, path)
+                        if (editRecord == null) {
+                            onAddNetwork(host, path)
+                        } else {
+                            onUpdateNetwork(editRecord, host, path)
+                        }
                         onDismiss()
                     },
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("Add network record")
+                    Text(if (editRecord == null) "Add network record" else "Save network record")
                 }
                 Spacer(Modifier.height(14.dp))
             }
-            TextButton(
-                onClick = {
-                    onClearRecords(selectedKind)
-                    onDismiss()
-                },
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text(
-                    text = when (selectedKind) {
-                        OpenRecordKind.File -> "Clear file records"
-                        OpenRecordKind.Folder -> "Clear folder records"
-                        OpenRecordKind.Network -> "Clear network records"
-                    }
-                )
+            if (editRecord == null) {
+                TextButton(
+                    onClick = {
+                        onClearRecords(selectedKind)
+                        onDismiss()
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = when (selectedKind) {
+                            OpenRecordKind.File -> "Clear file records"
+                            OpenRecordKind.Folder -> "Clear folder records"
+                            OpenRecordKind.Network -> "Clear network records"
+                        }
+                    )
+                }
             }
             Spacer(Modifier.height(20.dp))
         }
     }
+}
+
+private fun formatRecordTime(updatedAt: Long): String {
+    if (updatedAt <= 0L) return ""
+    return DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(updatedAt))
 }
 
 @Composable
