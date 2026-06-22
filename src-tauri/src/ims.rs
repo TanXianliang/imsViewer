@@ -5,7 +5,7 @@
 
 use byteorder::{LittleEndian, ReadBytesExt};
 use serde::Serialize;
-use std::io::{Cursor, Read};
+use std::io::{Cursor, Read, Seek, SeekFrom};
 
 /// IMS 文件魔数
 pub const MAGIC: &[u8; 8] = b"IMSIMAGE";
@@ -95,9 +95,13 @@ pub struct SubImagePayload {
 // ---- IMS 解析 ----
 
 /// 解析 IMS 文件，返回元数据。不提取图片数据。
+/// 只读取文件末尾的索引区（~KB 级），不读取前面的图片数据。
 pub fn parse_ims(filepath: &str) -> Result<ImsFileInfo, String> {
-    let data = std::fs::read(filepath).map_err(|e| format!("读取文件失败: {}", e))?;
-    let file_size = data.len() as u64;
+    let mut file = std::fs::File::open(filepath)
+        .map_err(|e| format!("打开文件失败: {}", e))?;
+    let file_size = file.metadata()
+        .map_err(|e| format!("读取文件信息失败: {}", e))?
+        .len();
 
     if file_size < 4 {
         return Err("文件太小，不是有效的 IMS 文件".into());
@@ -105,16 +109,27 @@ pub fn parse_ims(filepath: &str) -> Result<ImsFileInfo, String> {
 
     // 末尾 4 字节 → index_offset (u32 LE)
     let index_offset = {
-        let mut c = Cursor::new(&data[(file_size as usize) - 4..]);
-        c.read_u32::<LittleEndian>()
-            .map_err(|e| format!("读取 index_offset 失败: {}", e))?
+        file.seek(SeekFrom::End(-4))
+            .map_err(|e| format!("seek index_offset 失败: {}", e))?;
+        let mut buf = [0u8; 4];
+        file.read_exact(&mut buf)
+            .map_err(|e| format!("读取 index_offset 失败: {}", e))?;
+        u32::from_le_bytes(buf)
     };
 
     if index_offset as u64 >= file_size - 4 {
         return Err("索引偏移异常，不是有效的 IMS 文件".into());
     }
 
-    let mut c = Cursor::new(&data[index_offset as usize..]);
+    // 只读取索引区：从 index_offset 到 end-4
+    let index_len = (file_size - 4) - index_offset as u64;
+    file.seek(SeekFrom::Start(index_offset as u64))
+        .map_err(|e| format!("seek 索引区失败: {}", e))?;
+    let mut index_data = vec![0u8; index_len as usize];
+    file.read_exact(&mut index_data)
+        .map_err(|e| format!("读取索引区失败: {}", e))?;
+
+    let mut c = Cursor::new(&index_data[..]);
 
     // 验证 magic (8 bytes)
     let mut magic_buf = [0u8; 8];
@@ -191,14 +206,150 @@ pub fn parse_ims(filepath: &str) -> Result<ImsFileInfo, String> {
 }
 
 /// 从 IMS 文件中提取单张子图的原始字节
+///
+/// 自适应策略：
+/// - 文件 ≤ 16MB → 直接 `std::fs::read` 全文件再切片（本地 SSD 极快，且 OS 缓存友好）
+/// - 文件 > 16MB → seek + read_exact（避免网络/大文件全量传输）
 pub fn read_sub_image(filepath: &str, offset: u32, length: u32) -> Result<Vec<u8>, String> {
-    let data = std::fs::read(filepath).map_err(|e| format!("读取文件失败: {}", e))?;
-    let start = offset as usize;
-    let end = (offset + length) as usize;
-    if end > data.len() {
-        return Err(format!("数据偏移超出文件范围: {} + {} > {}", offset, length, data.len()));
+    // 先获取文件大小
+    let file_size = std::fs::metadata(filepath)
+        .map_err(|e| format!("读取文件信息失败: {}", e))?;
+    let size = file_size.len();
+
+    if size <= 16 * 1024 * 1024 {
+        // 小文件：整读 + 切片（1 次 syscall，OS 预读友好）
+        let data = std::fs::read(filepath)
+            .map_err(|e| format!("读取文件失败: {}", e))?;
+        let start = offset as usize;
+        let end = (offset + length) as usize;
+        if end > data.len() {
+            return Err(format!("数据偏移超出文件范围: {} + {} > {}", offset, length, data.len()));
+        }
+        Ok(data[start..end].to_vec())
+    } else {
+        // 大文件：seek 定位，只读需要的字节
+        let mut file = std::fs::File::open(filepath)
+            .map_err(|e| format!("打开文件失败: {}", e))?;
+        file.seek(SeekFrom::Start(offset as u64))
+            .map_err(|e| format!("seek 子图数据失败: {}", e))?;
+        let mut buf = vec![0u8; length as usize];
+        file.read_exact(&mut buf)
+            .map_err(|e| format!("读取子图数据失败: {} (offset={}, len={})", e, offset, length))?;
+        Ok(buf)
     }
-    Ok(data[start..end].to_vec())
+}
+
+/// 一次文件打开完成 IMS 解析 + 封面读取，减少 SMB CreateFile 次数
+pub fn parse_ims_and_read_cover(filepath: &str) -> Result<(ImsFileInfo, Vec<u8>), String> {
+    let mut file = std::fs::File::open(filepath)
+        .map_err(|e| format!("打开文件失败: {}", e))?;
+    let file_size = file.metadata()
+        .map_err(|e| format!("读取文件信息失败: {}", e))?
+        .len();
+
+    if file_size < 4 {
+        return Err("文件太小，不是有效的 IMS 文件".into());
+    }
+
+    // 末尾 4 字节 → index_offset
+    let index_offset = {
+        file.seek(SeekFrom::End(-4))
+            .map_err(|e| format!("seek index_offset 失败: {}", e))?;
+        let mut buf = [0u8; 4];
+        file.read_exact(&mut buf)
+            .map_err(|e| format!("读取 index_offset 失败: {}", e))?;
+        u32::from_le_bytes(buf)
+    };
+
+    if index_offset as u64 >= file_size - 4 {
+        return Err("索引偏移异常，不是有效的 IMS 文件".into());
+    }
+
+    // 读取索引区
+    let index_len = (file_size - 4) - index_offset as u64;
+    file.seek(SeekFrom::Start(index_offset as u64))
+        .map_err(|e| format!("seek 索引区失败: {}", e))?;
+    let mut index_data = vec![0u8; index_len as usize];
+    file.read_exact(&mut index_data)
+        .map_err(|e| format!("读取索引区失败: {}", e))?;
+
+    let mut c = Cursor::new(&index_data[..]);
+
+    // 验证 magic
+    let mut magic_buf = [0u8; 8];
+    c.read_exact(&mut magic_buf)
+        .map_err(|e| format!("读取 magic 失败: {}", e))?;
+    if &magic_buf != MAGIC {
+        return Err(format!("Magic 不匹配: 期望 {}, 实际 {}",
+            String::from_utf8_lossy(MAGIC), String::from_utf8_lossy(&magic_buf)));
+    }
+
+    // header
+    let version = c.read_u16::<LittleEndian>().unwrap();
+    let image_count = c.read_u32::<LittleEndian>().unwrap();
+    let data_start = c.read_u32::<LittleEndian>().unwrap();
+
+    if version != 1 && version != 2 {
+        return Err(format!("不支持的 IMS 版本: {}", version));
+    }
+
+    // 记录封面偏移和长度
+    let mut cover_offset: Option<(u32, u32)> = None;
+
+    let mut images = Vec::with_capacity(image_count as usize);
+    for i in 0..image_count as usize {
+        let name_len = c.read_u16::<LittleEndian>().unwrap() as usize;
+        let mut name_buf = vec![0u8; name_len];
+        c.read_exact(&mut name_buf)
+            .map_err(|e| format!("读取图片 {} 名称失败: {}", i, e))?;
+        let filename = String::from_utf8_lossy(&name_buf).to_string();
+
+        let format = c.read_u8().unwrap();
+        let data_offset = c.read_u32::<LittleEndian>().unwrap();
+        let data_length = c.read_u32::<LittleEndian>().unwrap();
+        let is_cover_byte = c.read_u8().unwrap();
+
+        if is_cover_byte != 0 || i == 0 {
+            cover_offset = Some((data_offset, data_length));
+        }
+
+        let hash = if version >= 2 {
+            let hash_algo = c.read_u8().unwrap();
+            if hash_algo == 1 {
+                let mut hash_buf = [0u8; 32];
+                c.read_exact(&mut hash_buf)
+                    .map_err(|e| format!("读取图片 {} hash 失败: {}", i, e))?;
+                Some(hash_buf.iter().map(|b| format!("{:02x}", b)).collect())
+            } else { None }
+        } else { None };
+
+        images.push(ImsImage {
+            index: i, filename, format, data_offset, data_length,
+            is_cover: is_cover_byte != 0, hash,
+        });
+    }
+
+    // 同一文件句柄读取封面数据
+    let cover_bytes = if let Some((off, len)) = cover_offset {
+        file.seek(SeekFrom::Start(off as u64))
+            .map_err(|e| format!("seek 封面数据失败: {}", e))?;
+        let mut buf = vec![0u8; len as usize];
+        file.read_exact(&mut buf)
+            .map_err(|e| format!("读取封面数据失败: {}", e))?;
+        buf
+    } else {
+        Vec::new()
+    };
+
+    Ok((ImsFileInfo {
+        filepath: filepath.to_string(),
+        file_size,
+        version,
+        image_count,
+        data_start,
+        index_offset,
+        images,
+    }, cover_bytes))
 }
 
 // ---- 文件夹扫描 ----

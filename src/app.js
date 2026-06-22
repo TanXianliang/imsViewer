@@ -69,6 +69,7 @@ function init() {
   setupThumbDrag();
   setupFolderBar();
   setupWindowControls();
+
   window.addEventListener('resize', () => {
     setupCanvasSize();
     if (state.isFitMode && state.imgObj) {
@@ -487,6 +488,25 @@ async function closeCurrentFile() {
 
 async function navigateFile(delta) {
   if (state.editMode || state.folderList.length === 0) return;
+
+  // 先检查目录是否有变更，有则刷新列表
+  const activePath = state.folderList[state.currentFileIdx]?.filepath;
+  if (activePath) {
+    const dir = activePath.replace(/[/\\][^/\\]*$/, '');
+    try {
+      const freshList = await invoke('refresh_folder', { dir });
+      if (freshList && freshList.length > 0) {
+        state.folderList = freshList;
+        state.currentFileIdx = freshList.findIndex(e => e.filepath === activePath);
+        if (state.currentFileIdx < 0) state.currentFileIdx = 0;
+        updateFolderBar();
+        updateStatusBar();
+      }
+    } catch (e) {
+      console.error('刷新文件夹失败:', e);
+    }
+  }
+
   let newIdx = state.currentFileIdx + delta;
   if (newIdx < 0) newIdx = state.folderList.length - 1;
   if (newIdx >= state.folderList.length) newIdx = 0;
