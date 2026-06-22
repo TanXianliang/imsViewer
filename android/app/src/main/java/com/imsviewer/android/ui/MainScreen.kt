@@ -51,6 +51,7 @@ import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -91,6 +92,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.imsviewer.android.domain.model.OpenRecord
 import com.imsviewer.android.domain.model.OpenRecordKind
+import com.imsviewer.android.domain.model.RemoteEntry
 import com.imsviewer.android.domain.model.ScreenState
 import com.imsviewer.android.domain.model.ViewerImage
 import com.imsviewer.android.util.SizeFormatter
@@ -122,6 +124,18 @@ fun MainScreen(
                 onAddNetwork = viewModel::addNetworkRecord,
                 onUpdateNetwork = viewModel::updateNetworkRecord
             )
+            ScreenState.Remote -> {
+                BackHandler(onBack = viewModel::navigateRemoteBack)
+                RemoteBrowserScreen(
+                    title = state.remoteTitle ?: "SFTP",
+                    path = state.remotePath,
+                    entries = state.remoteEntries,
+                    isBusy = state.isRemoteBusy,
+                    onBack = viewModel::navigateRemoteBack,
+                    onHome = viewModel::showHome,
+                    onOpenEntry = viewModel::openRemoteEntry
+                )
+            }
             ScreenState.Folder -> {
                 BackHandler(onBack = viewModel::showHome)
                 FolderGridScreen(
@@ -145,6 +159,8 @@ fun MainScreen(
                     BackHandler(
                         onBack = if (state.folderSequence.isNotEmpty()) {
                             viewModel::showFolder
+                        } else if (state.remoteConnection != null) {
+                            viewModel::showRemote
                         } else {
                             viewModel::showHome
                         }
@@ -157,7 +173,11 @@ fun MainScreen(
                         fileCount = state.fileSequence.size.coerceAtLeast(1),
                         thumbnails = state.thumbnails,
                         onToggleChrome = viewModel::toggleChrome,
-                        onHome = if (state.folderSequence.isNotEmpty()) viewModel::showFolder else viewModel::showHome,
+                        onHome = when {
+                            state.folderSequence.isNotEmpty() -> viewModel::showFolder
+                            state.remoteConnection != null -> viewModel::showRemote
+                            else -> viewModel::showHome
+                        },
                         onShowInfo = viewModel::showInfoSheet,
                         onShare = {
                             viewModel.shareIntent()?.let(onShare)
@@ -194,6 +214,109 @@ fun MainScreen(
                 image = state.currentImage!!,
                 onDismiss = viewModel::hideInfoSheet
             )
+        }
+
+        state.passwordPromptRecord?.let { record ->
+            NetworkPasswordSheet(
+                record = record,
+                onDismiss = viewModel::dismissNetworkPasswordPrompt,
+                onSubmit = viewModel::submitNetworkPassword
+            )
+        }
+    }
+}
+
+@Composable
+private fun RemoteBrowserScreen(
+    title: String,
+    path: String,
+    entries: List<RemoteEntry>,
+    isBusy: Boolean,
+    onBack: () -> Unit,
+    onHome: () -> Unit,
+    onOpenEntry: (RemoteEntry) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF0E0E11))
+            .windowInsetsPadding(WindowInsets.statusBars)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().height(56.dp).padding(start = 8.dp, end = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.Outlined.FolderOpen, contentDescription = "Back", tint = Color.White)
+            }
+            Column(Modifier.weight(1f)) {
+                Text(title, color = Color.White, fontSize = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(path, color = Color(0xFF9A9AA0), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            IconButton(onClick = onHome) {
+                Icon(Icons.Outlined.Home, contentDescription = "Home", tint = Color.White)
+            }
+        }
+
+        if (isBusy) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                Text("Loading", color = Color.White, fontSize = 13.sp)
+            }
+        }
+
+        if (entries.isEmpty() && !isBusy) {
+            Column(
+                modifier = Modifier.fillMaxSize().padding(28.dp),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text("No supported files", color = Color.White, fontSize = 18.sp)
+                Spacer(Modifier.height(8.dp))
+                Text("Directories and supported image files appear here.", color = Color(0xFF9A9AA0), fontSize = 13.sp)
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(entries, key = { it.path }) { entry ->
+                    RemoteEntryRow(entry = entry, onClick = { onOpenEntry(entry) })
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RemoteEntryRow(entry: RemoteEntry, onClick: () -> Unit) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = Color(0xFF19191E),
+        shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = if (entry.isDirectory) Icons.Outlined.FolderOpen else Icons.Outlined.PhotoLibrary,
+                contentDescription = null,
+                tint = Color.White,
+                modifier = Modifier.size(22.dp)
+            )
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(entry.name, color = Color.White, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (!entry.isDirectory) {
+                    Text(SizeFormatter.format(entry.sizeBytes), color = Color(0xFF9A9AA0), fontSize = 12.sp)
+                }
+            }
         }
     }
 }
@@ -316,8 +439,8 @@ private fun HomeScreen(
     onOpenRecord: (OpenRecord) -> Unit,
     onDeleteRecord: (OpenRecord) -> Unit,
     onClearRecords: (OpenRecordKind) -> Unit,
-    onAddNetwork: (String, String) -> Unit,
-    onUpdateNetwork: (OpenRecord, String, String) -> Unit
+    onAddNetwork: (String, String, String, String, String, Boolean, String) -> Unit,
+    onUpdateNetwork: (OpenRecord, String, String, String, String, String, Boolean, String) -> Unit
 ) {
     var selectedTab by remember { mutableIntStateOf(0) }
     var isSettingsVisible by remember { mutableStateOf(false) }
@@ -437,7 +560,7 @@ private fun RecordList(
     kind: OpenRecordKind,
     onOpenRecord: (OpenRecord) -> Unit,
     onDeleteRecord: (OpenRecord) -> Unit,
-    onUpdateNetwork: (OpenRecord, String, String) -> Unit
+    onUpdateNetwork: (OpenRecord, String, String, String, String, String, Boolean, String) -> Unit
 ) {
     var editRecord by remember { mutableStateOf<OpenRecord?>(null) }
 
@@ -482,8 +605,10 @@ private fun RecordList(
             selectedKind = OpenRecordKind.Network,
             editRecord = record,
             onDismiss = { editRecord = null },
-            onAddNetwork = { _, _ -> },
-            onUpdateNetwork = { targetRecord, host, path -> onUpdateNetwork(targetRecord, host, path) },
+            onAddNetwork = { _, _, _, _, _, _, _ -> },
+            onUpdateNetwork = { targetRecord, alias, host, port, username, password, savePassword, path ->
+                onUpdateNetwork(targetRecord, alias, host, port, username, password, savePassword, path)
+            },
             onClearRecords = {}
         )
     }
@@ -525,11 +650,16 @@ private fun HomeSettingsSheet(
     selectedKind: OpenRecordKind,
     editRecord: OpenRecord?,
     onDismiss: () -> Unit,
-    onAddNetwork: (String, String) -> Unit,
-    onUpdateNetwork: (OpenRecord, String, String) -> Unit,
+    onAddNetwork: (String, String, String, String, String, Boolean, String) -> Unit,
+    onUpdateNetwork: (OpenRecord, String, String, String, String, String, Boolean, String) -> Unit,
     onClearRecords: (OpenRecordKind) -> Unit
 ) {
+    var alias by remember(editRecord) { mutableStateOf(editRecord?.alias.orEmpty()) }
     var host by remember(editRecord) { mutableStateOf(editRecord?.host.orEmpty()) }
+    var port by remember(editRecord) { mutableStateOf(editRecord?.port?.toString() ?: "22") }
+    var username by remember(editRecord) { mutableStateOf(editRecord?.username.orEmpty()) }
+    var password by remember(editRecord) { mutableStateOf(editRecord?.password.orEmpty()) }
+    var savePassword by remember(editRecord) { mutableStateOf(editRecord?.password != null) }
     var path by remember(editRecord) { mutableStateOf(editRecord?.path ?: "/") }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
@@ -548,12 +678,54 @@ private fun HomeSettingsSheet(
             }
             if (selectedKind == OpenRecordKind.Network) {
                 TextField(
+                    value = alias,
+                    onValueChange = { alias = it },
+                    label = { Text("Name") },
+                    placeholder = { Text("Optional, defaults to host:port") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(10.dp))
+                TextField(
                     value = host,
                     onValueChange = { host = it },
                     label = { Text("Host") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
+                Spacer(Modifier.height(10.dp))
+                TextField(
+                    value = port,
+                    onValueChange = { port = it.filter(Char::isDigit).take(5) },
+                    label = { Text("Port") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(10.dp))
+                TextField(
+                    value = username,
+                    onValueChange = { username = it },
+                    label = { Text("Username") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(10.dp))
+                TextField(
+                    value = password,
+                    onValueChange = { password = it },
+                    label = { Text("Password") },
+                    placeholder = { Text(if (savePassword) "" else "Required when opening if not saved") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(10.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth().clickable { savePassword = !savePassword },
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Checkbox(checked = savePassword, onCheckedChange = { savePassword = it })
+                    Text("Save password", color = Color.White, fontSize = 14.sp)
+                }
                 Spacer(Modifier.height(10.dp))
                 TextField(
                     value = path,
@@ -566,9 +738,9 @@ private fun HomeSettingsSheet(
                 Button(
                     onClick = {
                         if (editRecord == null) {
-                            onAddNetwork(host, path)
+                            onAddNetwork(alias, host, port, username, password, savePassword, path)
                         } else {
-                            onUpdateNetwork(editRecord, host, path)
+                            onUpdateNetwork(editRecord, alias, host, port, username, password, savePassword, path)
                         }
                         onDismiss()
                     },
@@ -594,6 +766,50 @@ private fun HomeSettingsSheet(
                         }
                     )
                 }
+            }
+            Spacer(Modifier.height(20.dp))
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun NetworkPasswordSheet(
+    record: OpenRecord,
+    onDismiss: () -> Unit,
+    onSubmit: (OpenRecord, String) -> Unit
+) {
+    var password by remember(record.id) { mutableStateOf("") }
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        dragHandle = { BottomSheetDefaults.DragHandle() },
+        containerColor = Color(0xFF17171B)
+    ) {
+        Column(Modifier.fillMaxWidth().padding(20.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Password", color = Color.White, fontSize = 20.sp, modifier = Modifier.weight(1f))
+                IconButton(onClick = onDismiss) {
+                    Icon(Icons.Outlined.Close, contentDescription = "Close", tint = Color.White)
+                }
+            }
+            Text(record.title, color = Color(0xFFCCCCCC), fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Spacer(Modifier.height(12.dp))
+            TextField(
+                value = password,
+                onValueChange = { password = it },
+                label = { Text("SFTP password") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+            Spacer(Modifier.height(12.dp))
+            Button(
+                onClick = { onSubmit(record, password) },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Connect")
             }
             Spacer(Modifier.height(20.dp))
         }

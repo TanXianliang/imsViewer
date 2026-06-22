@@ -260,16 +260,16 @@
 目标：支持直接浏览 QNAP/NAS 等 SFTP 服务器中的 IMS 和图片文件，形成远程文件夹查看体验。
 
 首版远程方案：
-- [ ] 增加 `Open SFTP` 入口。
-- [ ] 实现 SFTP 连接配置：host、port、username、password、remote root path。
-- [ ] 首版使用账号密码登录，默认端口 `22`。
-- [ ] 使用 SFTP 列出远程目录和子目录。
-- [ ] 过滤支持格式：`.ims`、`.ims.jpg`、`.ims.png`、JPEG、PNG、WebP、AVIF。
-- [ ] 点击远程文件后，整文件下载到 App cache。
-- [ ] 下载完成后复用现有本地 IMS/图片解析和查看逻辑。
+- [x] 增加 `Open Network` / SFTP 入口。
+- [x] 实现 SFTP 连接配置：host、port、username、password、remote root path。
+- [x] 首版使用账号密码登录，默认端口 `22`。
+- [x] 使用 SFTP 列出远程目录和子目录。
+- [x] 过滤支持格式：`.ims`、`.ims.jpg`、`.ims.png`、JPEG、PNG、WebP、AVIF。
+- [x] 点击远程文件后，整文件下载到 App cache。
+- [x] 下载完成后复用现有本地 IMS/图片解析和查看逻辑。
 - [ ] 左右滑在当前远程目录文件序列中切换。
-- [ ] IMS 子图仍使用现有缩略图、点击切换、上下滑循环切换逻辑。
-- [ ] 显示下载中、连接失败、认证失败、文件不存在、下载失败等状态。
+- [x] IMS 子图仍使用现有缩略图、点击切换、上下滑循环切换逻辑。
+- [x] 显示下载中、连接失败、认证失败、文件不存在、下载失败等状态。
 - [ ] 提供取消下载和重试入口。
 
 验收：
@@ -321,7 +321,7 @@
 - [x] 从预览返回目录缩略图页时定位到当前图片。
 - [x] Android launcher 图标使用 `src-tauri/icons` 同源资源。
 - [x] Network 记录支持编辑 host/path 配置。
-- [ ] Network 记录点击后进入 SFTP 目录浏览。
+- [x] Network 记录点击后进入 SFTP 目录浏览。
 - [x] Folder 缩略图失败时显示稳定失败占位。
 - [x] Folder 缩略图缓存增加基础上限。
 - [x] Folder 缩略图失败项不重复解码。

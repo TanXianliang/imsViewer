@@ -7,8 +7,11 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.imsviewer.android.data.ImageRepository
+import com.imsviewer.android.data.SftpRepository
 import com.imsviewer.android.domain.model.OpenRecord
 import com.imsviewer.android.domain.model.OpenRecordKind
+import com.imsviewer.android.domain.model.RemoteConnection
+import com.imsviewer.android.domain.model.RemoteEntry
 import com.imsviewer.android.domain.model.ScreenState
 import com.imsviewer.android.domain.model.ViewerUiState
 import kotlinx.coroutines.Job
@@ -20,6 +23,7 @@ import kotlinx.coroutines.launch
 
 class ViewerViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = ImageRepository(application)
+    private val sftpRepository = SftpRepository(application)
     private val recordsStore = application.getSharedPreferences("open_records", Context.MODE_PRIVATE)
     private val _uiState = MutableStateFlow(ViewerUiState())
     val uiState: StateFlow<ViewerUiState> = _uiState.asStateFlow()
@@ -27,6 +31,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
     private var loadJob: Job? = null
     private var thumbnailJob: Job? = null
     private var folderThumbnailJob: Job? = null
+    private val sessionPasswords = mutableMapOf<String, String>()
 
     init {
         _uiState.update {
@@ -103,14 +108,17 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun openRecord(record: OpenRecord) {
-        val uri = record.uri?.let(Uri::parse) ?: return
         when (record.kind) {
             OpenRecordKind.File -> {
+                val uri = record.uri?.let(Uri::parse) ?: return
                 persistReadPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 openUriInternal(uri, refreshSequence = true, sourceRecord = record)
             }
-            OpenRecordKind.Folder -> openFolderFromRecord(record, uri)
-            OpenRecordKind.Network -> Unit
+            OpenRecordKind.Folder -> {
+                val uri = record.uri?.let(Uri::parse) ?: return
+                openFolderFromRecord(record, uri)
+            }
+            OpenRecordKind.Network -> openNetworkRecord(record)
         }
     }
 
@@ -155,6 +163,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun showHome() {
+        loadJob?.cancel()
         folderThumbnailJob?.cancel()
         _uiState.update {
             it.copy(
@@ -166,6 +175,13 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
                 folderSequence = emptyList(),
                 folderThumbnails = emptyMap(),
                 failedFolderThumbnails = emptySet(),
+                remoteConnection = null,
+                remoteTitle = null,
+                remotePath = "/",
+                remoteEntries = emptyList(),
+                remoteBackStack = emptyList(),
+                isRemoteBusy = false,
+                passwordPromptRecord = null,
                 thumbnails = emptyMap(),
                 isHomeVisible = true,
                 isUiVisible = true,
@@ -195,38 +211,211 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    fun addNetworkRecord(host: String, path: String) {
+    fun showRemote() {
+        val state = _uiState.value
+        if (state.remoteConnection == null) {
+            showHome()
+            return
+        }
+        _uiState.update {
+            it.copy(
+                screenState = ScreenState.Remote,
+                currentImage = null,
+                thumbnails = emptyMap(),
+                isUiVisible = true,
+                isInfoSheetVisible = false,
+                isSwitchingFile = false,
+                errorMessage = null
+            )
+        }
+    }
+
+    fun addNetworkRecord(
+        alias: String,
+        host: String,
+        port: String,
+        username: String,
+        password: String,
+        savePassword: Boolean,
+        path: String
+    ) {
         val normalizedHost = host.trim()
+        val normalizedUser = username.trim()
+        val normalizedPort = port.toIntOrNull()?.coerceIn(1, 65535) ?: 22
         val normalizedPath = path.trim().ifBlank { "/" }
-        if (normalizedHost.isBlank()) return
+        val normalizedAlias = alias.trim()
+        if (normalizedHost.isBlank() || normalizedUser.isBlank()) return
+        val title = normalizedAlias.ifBlank { "$normalizedHost:$normalizedPort" }
         val record = OpenRecord(
-            id = "network:$normalizedHost:$normalizedPath",
+            id = "network:$normalizedUser@$normalizedHost:$normalizedPort:$normalizedPath",
             kind = OpenRecordKind.Network,
-            title = normalizedHost,
+            title = title,
             subtitle = normalizedPath,
+            alias = normalizedAlias.ifBlank { null },
             host = normalizedHost,
+            port = normalizedPort,
+            username = normalizedUser,
+            password = password.takeIf { savePassword },
             path = normalizedPath
         )
         upsertRecord(record)
     }
 
-    fun updateNetworkRecord(record: OpenRecord, host: String, path: String) {
+    fun updateNetworkRecord(
+        record: OpenRecord,
+        alias: String,
+        host: String,
+        port: String,
+        username: String,
+        password: String,
+        savePassword: Boolean,
+        path: String
+    ) {
         val normalizedHost = host.trim()
+        val normalizedUser = username.trim()
+        val normalizedPort = port.toIntOrNull()?.coerceIn(1, 65535) ?: 22
         val normalizedPath = path.trim().ifBlank { "/" }
-        if (normalizedHost.isBlank()) return
+        val normalizedAlias = alias.trim()
+        if (normalizedHost.isBlank() || normalizedUser.isBlank()) return
+        val title = normalizedAlias.ifBlank { "$normalizedHost:$normalizedPort" }
         val updated = record.copy(
-            id = "network:$normalizedHost:$normalizedPath",
-            title = normalizedHost,
+            id = "network:$normalizedUser@$normalizedHost:$normalizedPort:$normalizedPath",
+            title = title,
             subtitle = normalizedPath,
+            alias = normalizedAlias.ifBlank { null },
             host = normalizedHost,
+            port = normalizedPort,
+            username = normalizedUser,
+            password = password.takeIf { savePassword },
             path = normalizedPath,
             uri = null
         )
+        if (!savePassword) {
+            sessionPasswords.remove(record.id)
+            sessionPasswords.remove(updated.id)
+        }
         val records = (listOf(updated.copy(updatedAt = System.currentTimeMillis())) +
             loadRecords(OpenRecordKind.Network).filterNot { it.id == record.id || it.id == updated.id })
             .take(MaxRecords)
         saveRecords(OpenRecordKind.Network, records)
         publishRecords(OpenRecordKind.Network, records)
+    }
+
+    fun submitNetworkPassword(record: OpenRecord, password: String) {
+        sessionPasswords[record.id] = password
+        _uiState.update { it.copy(passwordPromptRecord = null) }
+        openNetworkRecord(record)
+    }
+
+    fun dismissNetworkPasswordPrompt() {
+        _uiState.update { it.copy(passwordPromptRecord = null) }
+    }
+
+    fun openRemoteEntry(entry: RemoteEntry) {
+        val connection = _uiState.value.remoteConnection ?: return
+        if (entry.isDirectory) {
+            loadRemoteDirectory(connection, entry.path, pushCurrentPath = true)
+        } else {
+            downloadRemoteFile(connection, entry)
+        }
+    }
+
+    fun navigateRemoteBack() {
+        val state = _uiState.value
+        val connection = state.remoteConnection ?: return
+        val previousPath = state.remoteBackStack.lastOrNull()
+        if (previousPath == null) {
+            showHome()
+        } else {
+            loadRemoteDirectory(connection, previousPath, popBackStack = true)
+        }
+    }
+
+    private fun openNetworkRecord(record: OpenRecord) {
+        val password = record.password ?: sessionPasswords[record.id]
+        if (password == null) {
+            _uiState.update { it.copy(passwordPromptRecord = record, errorMessage = null) }
+            return
+        }
+        val connection = record.toRemoteConnection(password) ?: run {
+            showRecordOpenError(record, "Missing SFTP connection fields")
+            return
+        }
+        loadRemoteDirectory(connection, connection.rootPath, title = record.title)
+    }
+
+    private fun loadRemoteDirectory(
+        connection: RemoteConnection,
+        path: String,
+        title: String = _uiState.value.remoteTitle ?: "${connection.username}@${connection.host}:${connection.port}",
+        pushCurrentPath: Boolean = false,
+        popBackStack: Boolean = false
+    ) {
+        loadJob?.cancel()
+        val previousState = _uiState.value
+        loadJob = viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    screenState = ScreenState.Remote,
+                    remoteConnection = connection,
+                    remoteTitle = title,
+                    remotePath = path,
+                    isRemoteBusy = true,
+                    isHomeVisible = false,
+                    errorMessage = null
+                )
+            }
+            runCatching { sftpRepository.list(connection, path) }
+                .onSuccess { entries ->
+                    _uiState.update {
+                        val nextBackStack = when {
+                            pushCurrentPath -> it.remoteBackStack + previousState.remotePath
+                            popBackStack -> it.remoteBackStack.dropLast(1)
+                            else -> it.remoteBackStack
+                        }
+                        it.copy(
+                            screenState = ScreenState.Remote,
+                            remoteEntries = entries,
+                            remotePath = path,
+                            remoteBackStack = nextBackStack,
+                            isRemoteBusy = false,
+                            errorMessage = null
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    _uiState.update {
+                        it.copy(
+                            screenState = ScreenState.Remote,
+                            isRemoteBusy = false,
+                            errorMessage = error.message ?: "Failed to list remote directory"
+                        )
+                    }
+                }
+        }
+    }
+
+    private fun downloadRemoteFile(connection: RemoteConnection, entry: RemoteEntry) {
+        loadJob?.cancel()
+        loadJob = viewModelScope.launch {
+            _uiState.update {
+                it.copy(isRemoteBusy = true, errorMessage = null, loadingMessage = "Downloading ${entry.name}")
+            }
+            runCatching { sftpRepository.download(connection, entry) }
+                .onSuccess { download ->
+                    _uiState.update { it.copy(isRemoteBusy = false) }
+                    openLoadedUriFromSequence(download.uri, listOf(download.uri), 0, showFullScreenLoading = true)
+                }
+                .onFailure { error ->
+                    _uiState.update {
+                        it.copy(
+                            screenState = ScreenState.Remote,
+                            isRemoteBusy = false,
+                            errorMessage = error.message ?: "Failed to download remote file"
+                        )
+                    }
+                }
+        }
     }
 
     fun deleteRecord(record: OpenRecord) {
@@ -498,7 +687,11 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
             record.title,
             record.subtitle,
             record.uri.orEmpty(),
+            record.alias.orEmpty(),
             record.host.orEmpty(),
+            record.port.toString(),
+            record.username.orEmpty(),
+            record.password.orEmpty(),
             record.path.orEmpty(),
             record.updatedAt.toString()
         ).joinToString(separator = "\u001F") { it.replace("\u001F", " ") }
@@ -507,15 +700,59 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
     private fun decodeRecord(kind: OpenRecordKind, value: String): OpenRecord? {
         val parts = value.split("\u001F")
         if (parts.size < 7) return null
+        if (parts.size == 7) {
+            return OpenRecord(
+                id = parts[0],
+                kind = kind,
+                title = parts[1],
+                subtitle = parts[2],
+                uri = parts[3].ifBlank { null },
+                host = parts[4].ifBlank { null },
+                path = parts[5].ifBlank { null },
+                updatedAt = parts[6].toLongOrNull() ?: 0L
+            )
+        }
+        if (parts.size == 10) {
+            return OpenRecord(
+                id = parts[0],
+                kind = kind,
+                title = parts[1],
+                subtitle = parts[2],
+                uri = parts[3].ifBlank { null },
+                host = parts[4].ifBlank { null },
+                port = parts[5].toIntOrNull() ?: 22,
+                username = parts[6].ifBlank { null },
+                password = parts[7].ifBlank { null },
+                path = parts[8].ifBlank { null },
+                updatedAt = parts[9].toLongOrNull() ?: 0L
+            )
+        }
+        if (parts.size < 11) return null
         return OpenRecord(
             id = parts[0],
             kind = kind,
             title = parts[1],
             subtitle = parts[2],
             uri = parts[3].ifBlank { null },
-            host = parts[4].ifBlank { null },
-            path = parts[5].ifBlank { null },
-            updatedAt = parts[6].toLongOrNull() ?: 0L
+            alias = parts[4].ifBlank { null },
+            host = parts[5].ifBlank { null },
+            port = parts[6].toIntOrNull() ?: 22,
+            username = parts[7].ifBlank { null },
+            password = parts[8].ifBlank { null },
+            path = parts[9].ifBlank { null },
+            updatedAt = parts.getOrNull(10)?.toLongOrNull() ?: 0L
+        )
+    }
+
+    private fun OpenRecord.toRemoteConnection(password: String): RemoteConnection? {
+        val host = host?.takeIf { it.isNotBlank() } ?: return null
+        val username = username?.takeIf { it.isNotBlank() } ?: return null
+        return RemoteConnection(
+            host = host,
+            port = port,
+            username = username,
+            password = password,
+            rootPath = path?.takeIf { it.isNotBlank() } ?: "/"
         )
     }
 

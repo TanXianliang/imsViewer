@@ -6,6 +6,7 @@ import android.net.Uri
 enum class ScreenState {
     Empty,
     Folder,
+    Remote,
     Loading,
     Ready,
     Error
@@ -23,6 +24,13 @@ data class ViewerUiState(
     val folderSequence: List<Uri> = emptyList(),
     val folderThumbnails: Map<Uri, Bitmap> = emptyMap(),
     val failedFolderThumbnails: Set<Uri> = emptySet(),
+    val remoteConnection: RemoteConnection? = null,
+    val remoteTitle: String? = null,
+    val remotePath: String = "/",
+    val remoteEntries: List<RemoteEntry> = emptyList(),
+    val remoteBackStack: List<String> = emptyList(),
+    val isRemoteBusy: Boolean = false,
+    val passwordPromptRecord: OpenRecord? = null,
     val isHomeVisible: Boolean = true,
     val thumbnails: Map<Int, Bitmap> = emptyMap(),
     val isUiVisible: Boolean = true,

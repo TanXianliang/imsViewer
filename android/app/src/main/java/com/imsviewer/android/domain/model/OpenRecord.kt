@@ -12,7 +12,11 @@ data class OpenRecord(
     val title: String,
     val subtitle: String,
     val uri: String? = null,
+    val alias: String? = null,
     val host: String? = null,
+    val port: Int = 22,
+    val username: String? = null,
+    val password: String? = null,
     val path: String? = null,
     val updatedAt: Long = System.currentTimeMillis()
 )
