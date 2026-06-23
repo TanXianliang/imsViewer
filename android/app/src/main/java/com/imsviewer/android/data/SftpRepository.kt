@@ -46,10 +46,10 @@ class SftpRepository(private val context: Context) {
             }
         }
 
-    suspend fun download(connection: RemoteConnection, entry: RemoteEntry): RemoteDownload =
+    suspend fun download(connection: RemoteConnection, entry: RemoteEntry, maxCacheBytes: Long): RemoteDownload =
         withContext(Dispatchers.IO) {
             require(!entry.isDirectory) { "Remote entry is a directory" }
-            val cacheDir = File(context.cacheDir, "sftp")
+            val cacheDir = sftpCacheDir()
             cacheDir.mkdirs()
             val safeName = entry.name.replace(Regex("[^A-Za-z0-9._-]"), "_")
             val localFile = File(cacheDir, "${System.currentTimeMillis()}_$safeName")
@@ -58,12 +58,38 @@ class SftpRepository(private val context: Context) {
                     sftp.get(entry.path, output)
                 }
             }
+            trimCache(maxCacheBytes, keepFile = localFile)
             RemoteDownload(
                 uri = Uri.fromFile(localFile),
                 fileName = entry.name,
                 entry = entry
             )
         }
+
+    suspend fun clearCache() = withContext(Dispatchers.IO) {
+        sftpCacheDir().listFiles()?.forEach { file ->
+            if (file.isFile) file.delete()
+        }
+    }
+
+    private fun trimCache(maxCacheBytes: Long, keepFile: File) {
+        if (maxCacheBytes <= 0L) return
+        val files = sftpCacheDir()
+            .listFiles()
+            .orEmpty()
+            .filter { it.isFile }
+            .sortedByDescending { it.lastModified() }
+        var totalBytes = keepFile.length()
+        files.forEach { file ->
+            if (file.absolutePath == keepFile.absolutePath) return@forEach
+            totalBytes += file.length()
+            if (totalBytes > maxCacheBytes) {
+                file.delete()
+            }
+        }
+    }
+
+    private fun sftpCacheDir(): File = File(context.cacheDir, "sftp")
 
     private fun <T> withSftp(connection: RemoteConnection, block: (ChannelSftp) -> T): T {
         val session = JSch().getSession(connection.username, connection.host, connection.port)

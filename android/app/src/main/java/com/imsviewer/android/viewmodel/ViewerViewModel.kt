@@ -27,6 +27,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
     private val repository = ImageRepository(application)
     private val sftpRepository = SftpRepository(application)
     private val recordsStore = application.getSharedPreferences("open_records", Context.MODE_PRIVATE)
+    private val settingsStore = application.getSharedPreferences("viewer_settings", Context.MODE_PRIVATE)
     private val passwordStore = SecurePasswordStore(application)
     private val _uiState = MutableStateFlow(ViewerUiState())
     val uiState: StateFlow<ViewerUiState> = _uiState.asStateFlow()
@@ -45,7 +46,8 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
             it.copy(
                 fileRecords = fileRecords,
                 folderRecords = folderRecords,
-                networkRecords = networkRecords
+                networkRecords = networkRecords,
+                networkCacheLimitMb = loadNetworkCacheLimitMb()
             )
         }
     }
@@ -438,7 +440,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
             _uiState.update {
                 it.copy(isRemoteBusy = true, errorMessage = null, loadingMessage = "Downloading ${entry.name}")
             }
-            runCatching { sftpRepository.download(connection, entry) }
+            runCatching { sftpRepository.download(connection, entry, networkCacheLimitBytes()) }
                 .onSuccess { download ->
                     _uiState.update { it.copy(isRemoteBusy = false) }
                     openLoadedUriFromSequence(download.uri, listOf(download.uri), 0, showFullScreenLoading = true)
@@ -451,6 +453,25 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
                             errorMessage = error.message ?: "Failed to download remote file"
                         )
                     }
+                }
+        }
+    }
+
+    fun updateNetworkCacheLimit(limitMb: String) {
+        val normalizedLimit = limitMb.toIntOrNull()?.coerceIn(MinNetworkCacheLimitMb, MaxNetworkCacheLimitMb)
+            ?: DefaultNetworkCacheLimitMb
+        settingsStore.edit().putInt(NetworkCacheLimitMbKey, normalizedLimit).apply()
+        _uiState.update { it.copy(networkCacheLimitMb = normalizedLimit) }
+    }
+
+    fun clearNetworkCache() {
+        viewModelScope.launch {
+            runCatching { sftpRepository.clearCache() }
+                .onSuccess {
+                    _uiState.update { it.copy(errorMessage = "Network cache cleared") }
+                }
+                .onFailure { error ->
+                    _uiState.update { it.copy(errorMessage = error.message ?: "Failed to clear network cache") }
                 }
         }
     }
@@ -715,6 +736,13 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.update { it.copy(homeTab = kind) }
     }
 
+    private fun loadNetworkCacheLimitMb(): Int {
+        return settingsStore.getInt(NetworkCacheLimitMbKey, DefaultNetworkCacheLimitMb)
+            .coerceIn(MinNetworkCacheLimitMb, MaxNetworkCacheLimitMb)
+    }
+
+    private fun networkCacheLimitBytes(): Long = _uiState.value.networkCacheLimitMb.toLong() * BytesPerMb
+
     private fun loadRecords(kind: OpenRecordKind): List<OpenRecord> {
         return recordsStore.getStringSet(kind.preferenceKey, emptySet()).orEmpty()
             .mapNotNull { decodeRecord(kind, it) }
@@ -903,5 +931,10 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
         const val MaxRecords = 30
         const val MaxFolderThumbnails = 160
         const val SavedPasswordMarker = "__saved_password__"
+        const val NetworkCacheLimitMbKey = "network_cache_limit_mb"
+        const val DefaultNetworkCacheLimitMb = 512
+        const val MinNetworkCacheLimitMb = 64
+        const val MaxNetworkCacheLimitMb = 8192
+        const val BytesPerMb = 1024L * 1024L
     }
 }

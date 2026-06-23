@@ -120,6 +120,7 @@ fun MainScreen(
                 folderRecords = state.folderRecords,
                 networkRecords = state.networkRecords,
                 selectedKind = state.homeTab,
+                networkCacheLimitMb = state.networkCacheLimitMb,
                 onSelectKind = viewModel::selectHomeTab,
                 onOpenFile = onOpenFile,
                 onOpenFolder = onOpenFolder,
@@ -127,7 +128,9 @@ fun MainScreen(
                 onDeleteRecord = viewModel::deleteRecord,
                 onClearRecords = viewModel::clearRecords,
                 onAddNetwork = viewModel::addNetworkRecord,
-                onUpdateNetwork = viewModel::updateNetworkRecord
+                onUpdateNetwork = viewModel::updateNetworkRecord,
+                onUpdateNetworkCacheLimit = viewModel::updateNetworkCacheLimit,
+                onClearNetworkCache = viewModel::clearNetworkCache
             )
             ScreenState.Remote -> {
                 BackHandler(onBack = viewModel::navigateRemoteBack)
@@ -440,6 +443,7 @@ private fun HomeScreen(
     folderRecords: List<OpenRecord>,
     networkRecords: List<OpenRecord>,
     selectedKind: OpenRecordKind,
+    networkCacheLimitMb: Int,
     onSelectKind: (OpenRecordKind) -> Unit,
     onOpenFile: () -> Unit,
     onOpenFolder: () -> Unit,
@@ -447,7 +451,9 @@ private fun HomeScreen(
     onDeleteRecord: (OpenRecord) -> Unit,
     onClearRecords: (OpenRecordKind) -> Unit,
     onAddNetwork: (String, String, String, String, String, Boolean, String) -> Unit,
-    onUpdateNetwork: (OpenRecord, String, String, String, String, String, Boolean, String) -> Unit
+    onUpdateNetwork: (OpenRecord, String, String, String, String, String, Boolean, String) -> Unit,
+    onUpdateNetworkCacheLimit: (String) -> Unit,
+    onClearNetworkCache: () -> Unit
 ) {
     var isSettingsVisible by remember { mutableStateOf(false) }
     val tabs = listOf("Open File", "Open Folder", "Open Network")
@@ -535,7 +541,10 @@ private fun HomeScreen(
             kind = kinds[selectedTab],
             onOpenRecord = onOpenRecord,
             onDeleteRecord = onDeleteRecord,
-            onUpdateNetwork = onUpdateNetwork
+            onUpdateNetwork = onUpdateNetwork,
+            networkCacheLimitMb = networkCacheLimitMb,
+            onUpdateNetworkCacheLimit = onUpdateNetworkCacheLimit,
+            onClearNetworkCache = onClearNetworkCache
         )
     }
 
@@ -543,10 +552,13 @@ private fun HomeScreen(
         HomeSettingsSheet(
             selectedKind = kinds[selectedTab],
             editRecord = null,
+            networkCacheLimitMb = networkCacheLimitMb,
             onDismiss = { isSettingsVisible = false },
             onAddNetwork = onAddNetwork,
             onUpdateNetwork = onUpdateNetwork,
-            onClearRecords = onClearRecords
+            onClearRecords = onClearRecords,
+            onUpdateNetworkCacheLimit = onUpdateNetworkCacheLimit,
+            onClearNetworkCache = onClearNetworkCache
         )
     }
 }
@@ -585,7 +597,10 @@ private fun RecordList(
     kind: OpenRecordKind,
     onOpenRecord: (OpenRecord) -> Unit,
     onDeleteRecord: (OpenRecord) -> Unit,
-    onUpdateNetwork: (OpenRecord, String, String, String, String, String, Boolean, String) -> Unit
+    onUpdateNetwork: (OpenRecord, String, String, String, String, String, Boolean, String) -> Unit,
+    networkCacheLimitMb: Int,
+    onUpdateNetworkCacheLimit: (String) -> Unit,
+    onClearNetworkCache: () -> Unit
 ) {
     var editRecord by remember { mutableStateOf<OpenRecord?>(null) }
 
@@ -629,12 +644,15 @@ private fun RecordList(
         HomeSettingsSheet(
             selectedKind = OpenRecordKind.Network,
             editRecord = record,
+            networkCacheLimitMb = networkCacheLimitMb,
             onDismiss = { editRecord = null },
             onAddNetwork = { _, _, _, _, _, _, _ -> },
             onUpdateNetwork = { targetRecord, alias, host, port, username, password, savePassword, path ->
                 onUpdateNetwork(targetRecord, alias, host, port, username, password, savePassword, path)
             },
-            onClearRecords = {}
+            onClearRecords = {},
+            onUpdateNetworkCacheLimit = onUpdateNetworkCacheLimit,
+            onClearNetworkCache = onClearNetworkCache
         )
     }
 }
@@ -674,10 +692,13 @@ private fun RecordRow(record: OpenRecord, onOpen: () -> Unit, onEdit: () -> Unit
 private fun HomeSettingsSheet(
     selectedKind: OpenRecordKind,
     editRecord: OpenRecord?,
+    networkCacheLimitMb: Int,
     onDismiss: () -> Unit,
     onAddNetwork: (String, String, String, String, String, Boolean, String) -> Unit,
     onUpdateNetwork: (OpenRecord, String, String, String, String, String, Boolean, String) -> Unit,
-    onClearRecords: (OpenRecordKind) -> Unit
+    onClearRecords: (OpenRecordKind) -> Unit,
+    onUpdateNetworkCacheLimit: (String) -> Unit,
+    onClearNetworkCache: () -> Unit
 ) {
     var alias by remember(editRecord) { mutableStateOf(editRecord?.alias.orEmpty()) }
     var host by remember(editRecord) { mutableStateOf(editRecord?.host.orEmpty()) }
@@ -687,6 +708,7 @@ private fun HomeSettingsSheet(
     var savePassword by remember(editRecord) { mutableStateOf(editRecord?.hasSavedPassword == true) }
     var isPasswordVisible by remember(editRecord) { mutableStateOf(false) }
     var path by remember(editRecord) { mutableStateOf(editRecord?.path ?: "/") }
+    var cacheLimitMb by remember(networkCacheLimitMb) { mutableStateOf(networkCacheLimitMb.toString()) }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     ModalBottomSheet(
@@ -780,8 +802,24 @@ private fun HomeSettingsSheet(
                     modifier = Modifier.fillMaxWidth()
                 )
                 Spacer(Modifier.height(12.dp))
+                TextField(
+                    value = cacheLimitMb,
+                    onValueChange = { cacheLimitMb = it.filter(Char::isDigit).take(5) },
+                    label = { Text("Network cache limit (MB)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(10.dp))
+                TextButton(
+                    onClick = onClearNetworkCache,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Clear network cache")
+                }
+                Spacer(Modifier.height(12.dp))
                 Button(
                     onClick = {
+                        onUpdateNetworkCacheLimit(cacheLimitMb)
                         if (editRecord == null) {
                             onAddNetwork(alias, host, port, username, password, savePassword, path)
                         } else {
