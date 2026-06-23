@@ -3,5 +3,6 @@ __pycache__/
 *.pyo
 node_modules/
 dist/
+bin/
 src-tauri/target/
 /samples/test
