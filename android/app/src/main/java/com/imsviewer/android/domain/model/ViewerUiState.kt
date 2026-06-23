@@ -20,6 +20,7 @@ data class ViewerUiState(
     val fileRecords: List<OpenRecord> = emptyList(),
     val folderRecords: List<OpenRecord> = emptyList(),
     val networkRecords: List<OpenRecord> = emptyList(),
+    val homeTab: OpenRecordKind = OpenRecordKind.File,
     val folderTitle: String? = null,
     val folderSequence: List<Uri> = emptyList(),
     val folderThumbnails: Map<Uri, Bitmap> = emptyMap(),

@@ -7,6 +7,7 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.imsviewer.android.data.ImageRepository
+import com.imsviewer.android.data.SecurePasswordStore
 import com.imsviewer.android.data.SftpRepository
 import com.imsviewer.android.domain.model.OpenRecord
 import com.imsviewer.android.domain.model.OpenRecordKind
@@ -20,11 +21,13 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.util.UUID
 
 class ViewerViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = ImageRepository(application)
     private val sftpRepository = SftpRepository(application)
     private val recordsStore = application.getSharedPreferences("open_records", Context.MODE_PRIVATE)
+    private val passwordStore = SecurePasswordStore(application)
     private val _uiState = MutableStateFlow(ViewerUiState())
     val uiState: StateFlow<ViewerUiState> = _uiState.asStateFlow()
 
@@ -34,22 +37,28 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
     private val sessionPasswords = mutableMapOf<String, String>()
 
     init {
+        val fileRecords = loadRecords(OpenRecordKind.File)
+        val folderRecords = loadRecords(OpenRecordKind.Folder)
+        val networkRecords = loadRecords(OpenRecordKind.Network)
+        saveRecords(OpenRecordKind.Network, networkRecords)
         _uiState.update {
             it.copy(
-                fileRecords = loadRecords(OpenRecordKind.File),
-                folderRecords = loadRecords(OpenRecordKind.Folder),
-                networkRecords = loadRecords(OpenRecordKind.Network)
+                fileRecords = fileRecords,
+                folderRecords = folderRecords,
+                networkRecords = networkRecords
             )
         }
     }
 
     fun openUri(uri: Uri, flags: Int = 0) {
+        setHomeTab(OpenRecordKind.File)
         persistReadPermission(uri, flags)
         addUriRecord(OpenRecordKind.File, uri)
         openUriInternal(uri, refreshSequence = true)
     }
 
     fun openFolder(uri: Uri, flags: Int = 0) {
+        setHomeTab(OpenRecordKind.Folder)
         persistReadPermission(uri, flags)
         addUriRecord(OpenRecordKind.Folder, uri)
         loadJob?.cancel()
@@ -70,6 +79,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
                         _uiState.update {
                             it.copy(
                                 screenState = ScreenState.Folder,
+                                homeTab = OpenRecordKind.Folder,
                                 folderTitle = repository.displayName(uri),
                                 folderSequence = sequence,
                                 folderThumbnails = emptyMap(),
@@ -99,6 +109,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
     fun openUriSequence(uris: List<Uri>, flags: Int = 0) {
         val sequence = uris.distinct()
         val firstUri = sequence.firstOrNull() ?: return
+        setHomeTab(OpenRecordKind.File)
         sequence.forEach { persistReadPermission(it, flags) }
         addUriRecord(OpenRecordKind.File, firstUri)
         loadJob?.cancel()
@@ -108,6 +119,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun openRecord(record: OpenRecord) {
+        setHomeTab(record.kind)
         when (record.kind) {
             OpenRecordKind.File -> {
                 val uri = record.uri?.let(Uri::parse) ?: return
@@ -135,6 +147,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
                         _uiState.update {
                             it.copy(
                                 screenState = ScreenState.Folder,
+                                homeTab = OpenRecordKind.Folder,
                                 folderTitle = record.title,
                                 folderSequence = sequence,
                                 folderThumbnails = emptyMap(),
@@ -192,6 +205,10 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    fun selectHomeTab(kind: OpenRecordKind) {
+        setHomeTab(kind)
+    }
+
     fun showFolder() {
         val state = _uiState.value
         if (state.folderSequence.isEmpty()) {
@@ -201,6 +218,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.update {
             it.copy(
                 screenState = ScreenState.Folder,
+                homeTab = OpenRecordKind.Folder,
                 currentImage = null,
                 thumbnails = emptyMap(),
                 isUiVisible = true,
@@ -220,6 +238,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.update {
             it.copy(
                 screenState = ScreenState.Remote,
+                homeTab = OpenRecordKind.Network,
                 currentImage = null,
                 thumbnails = emptyMap(),
                 isUiVisible = true,
@@ -246,8 +265,10 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
         val normalizedAlias = alias.trim()
         if (normalizedHost.isBlank() || normalizedUser.isBlank()) return
         val title = normalizedAlias.ifBlank { "$normalizedHost:$normalizedPort" }
+        val recordId = newNetworkRecordId()
+        val hasSavedPassword = persistNetworkPassword(recordId, password, savePassword)
         val record = OpenRecord(
-            id = "network:$normalizedUser@$normalizedHost:$normalizedPort:$normalizedPath",
+            id = recordId,
             kind = OpenRecordKind.Network,
             title = title,
             subtitle = normalizedPath,
@@ -255,7 +276,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
             host = normalizedHost,
             port = normalizedPort,
             username = normalizedUser,
-            password = password.takeIf { savePassword },
+            hasSavedPassword = hasSavedPassword,
             path = normalizedPath
         )
         upsertRecord(record)
@@ -278,31 +299,44 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
         val normalizedAlias = alias.trim()
         if (normalizedHost.isBlank() || normalizedUser.isBlank()) return
         val title = normalizedAlias.ifBlank { "$normalizedHost:$normalizedPort" }
+        val existingPassword = if (savePassword && password.isBlank()) {
+            passwordStore.load(record.id) ?: sessionPasswords[record.id]
+        } else {
+            null
+        }
+        val hasSavedPassword = persistNetworkPassword(
+            record.id,
+            password.ifBlank { existingPassword.orEmpty() },
+            savePassword
+        )
         val updated = record.copy(
-            id = "network:$normalizedUser@$normalizedHost:$normalizedPort:$normalizedPath",
             title = title,
             subtitle = normalizedPath,
             alias = normalizedAlias.ifBlank { null },
             host = normalizedHost,
             port = normalizedPort,
             username = normalizedUser,
-            password = password.takeIf { savePassword },
+            password = null,
+            hasSavedPassword = hasSavedPassword,
             path = normalizedPath,
             uri = null
         )
         if (!savePassword) {
+            passwordStore.delete(record.id)
             sessionPasswords.remove(record.id)
-            sessionPasswords.remove(updated.id)
         }
         val records = (listOf(updated.copy(updatedAt = System.currentTimeMillis())) +
-            loadRecords(OpenRecordKind.Network).filterNot { it.id == record.id || it.id == updated.id })
+            loadRecords(OpenRecordKind.Network).filterNot { it.id == record.id })
             .take(MaxRecords)
         saveRecords(OpenRecordKind.Network, records)
         publishRecords(OpenRecordKind.Network, records)
     }
 
-    fun submitNetworkPassword(record: OpenRecord, password: String) {
+    fun submitNetworkPassword(record: OpenRecord, password: String, savePassword: Boolean) {
         sessionPasswords[record.id] = password
+        if (savePassword) {
+            setNetworkRecordSavedPassword(record.id, persistNetworkPassword(record.id, password, savePassword = true))
+        }
         _uiState.update { it.copy(passwordPromptRecord = null) }
         openNetworkRecord(record)
     }
@@ -332,7 +366,8 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private fun openNetworkRecord(record: OpenRecord) {
-        val password = record.password ?: sessionPasswords[record.id]
+        setHomeTab(OpenRecordKind.Network)
+        val password = sessionPasswords[record.id] ?: passwordStore.load(record.id)
         if (password == null) {
             _uiState.update { it.copy(passwordPromptRecord = record, errorMessage = null) }
             return
@@ -357,6 +392,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
             _uiState.update {
                 it.copy(
                     screenState = ScreenState.Remote,
+                    homeTab = OpenRecordKind.Network,
                     remoteConnection = connection,
                     remoteTitle = title,
                     remotePath = path,
@@ -375,6 +411,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
                         }
                         it.copy(
                             screenState = ScreenState.Remote,
+                            homeTab = OpenRecordKind.Network,
                             remoteEntries = entries,
                             remotePath = path,
                             remoteBackStack = nextBackStack,
@@ -419,12 +456,22 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun deleteRecord(record: OpenRecord) {
+        if (record.kind == OpenRecordKind.Network) {
+            passwordStore.delete(record.id)
+            sessionPasswords.remove(record.id)
+        }
         val records = loadRecords(record.kind).filterNot { it.id == record.id }
         saveRecords(record.kind, records)
         publishRecords(record.kind, records)
     }
 
     fun clearRecords(kind: OpenRecordKind) {
+        if (kind == OpenRecordKind.Network) {
+            loadRecords(kind).forEach { record ->
+                passwordStore.delete(record.id)
+                sessionPasswords.remove(record.id)
+            }
+        }
         saveRecords(kind, emptyList())
         publishRecords(kind, emptyList())
     }
@@ -449,6 +496,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
                     _uiState.update {
                         it.copy(
                             screenState = ScreenState.Ready,
+                            homeTab = sourceRecord?.kind ?: OpenRecordKind.File,
                             currentImage = image,
                             fileSequence = normalizedSequence,
                             fileIndex = currentIndex,
@@ -505,8 +553,14 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
         runCatching { repository.open(uri) }
             .onSuccess { image ->
                 _uiState.update {
+                    val homeTab = when {
+                        it.remoteConnection != null -> OpenRecordKind.Network
+                        it.folderSequence.isNotEmpty() -> OpenRecordKind.Folder
+                        else -> OpenRecordKind.File
+                    }
                     it.copy(
                         screenState = ScreenState.Ready,
+                        homeTab = homeTab,
                         currentImage = image,
                         fileSequence = sequence,
                         fileIndex = index,
@@ -657,6 +711,10 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    private fun setHomeTab(kind: OpenRecordKind) {
+        _uiState.update { it.copy(homeTab = kind) }
+    }
+
     private fun loadRecords(kind: OpenRecordKind): List<OpenRecord> {
         return recordsStore.getStringSet(kind.preferenceKey, emptySet()).orEmpty()
             .mapNotNull { decodeRecord(kind, it) }
@@ -691,7 +749,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
             record.host.orEmpty(),
             record.port.toString(),
             record.username.orEmpty(),
-            record.password.orEmpty(),
+            if (record.hasSavedPassword) SavedPasswordMarker else "",
             record.path.orEmpty(),
             record.updatedAt.toString()
         ).joinToString(separator = "\u001F") { it.replace("\u001F", " ") }
@@ -713,6 +771,9 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
             )
         }
         if (parts.size == 10) {
+            val password = parts[7].ifBlank { null }
+            val recordId = parts[0]
+            val migratedPassword = password != null && !passwordStore.has(recordId) && passwordStore.save(recordId, password)
             return OpenRecord(
                 id = parts[0],
                 kind = kind,
@@ -722,12 +783,20 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
                 host = parts[4].ifBlank { null },
                 port = parts[5].toIntOrNull() ?: 22,
                 username = parts[6].ifBlank { null },
-                password = parts[7].ifBlank { null },
+                password = null,
+                hasSavedPassword = migratedPassword || passwordStore.has(recordId),
                 path = parts[8].ifBlank { null },
                 updatedAt = parts[9].toLongOrNull() ?: 0L
             )
         }
         if (parts.size < 11) return null
+        val recordId = parts[0]
+        val passwordOrSavedFlag = parts[8]
+        val legacyPassword = passwordOrSavedFlag
+            .takeUnless { it == SavedPasswordMarker }
+            ?.ifBlank { null }
+        val migratedPassword = legacyPassword != null && !passwordStore.has(recordId) &&
+            passwordStore.save(recordId, legacyPassword)
         return OpenRecord(
             id = parts[0],
             kind = kind,
@@ -738,11 +807,34 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
             host = parts[5].ifBlank { null },
             port = parts[6].toIntOrNull() ?: 22,
             username = parts[7].ifBlank { null },
-            password = parts[8].ifBlank { null },
+            password = null,
+            hasSavedPassword = passwordOrSavedFlag == SavedPasswordMarker || migratedPassword || passwordStore.has(recordId),
             path = parts[9].ifBlank { null },
             updatedAt = parts.getOrNull(10)?.toLongOrNull() ?: 0L
         )
     }
+
+    private fun setNetworkRecordSavedPassword(recordId: String, hasSavedPassword: Boolean) {
+        val records = loadRecords(OpenRecordKind.Network).map { record ->
+            if (record.id == recordId) record.copy(hasSavedPassword = hasSavedPassword) else record
+        }
+        saveRecords(OpenRecordKind.Network, records)
+        publishRecords(OpenRecordKind.Network, records)
+    }
+
+    private fun persistNetworkPassword(recordId: String, password: String, savePassword: Boolean): Boolean {
+        if (!savePassword) {
+            passwordStore.delete(recordId)
+            sessionPasswords.remove(recordId)
+            return false
+        }
+        if (password.isNotBlank()) {
+            return passwordStore.save(recordId, password)
+        }
+        return passwordStore.has(recordId)
+    }
+
+    private fun newNetworkRecordId(): String = "network:${UUID.randomUUID()}"
 
     private fun OpenRecord.toRemoteConnection(password: String): RemoteConnection? {
         val host = host?.takeIf { it.isNotBlank() } ?: return null
@@ -810,5 +902,6 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
     private companion object {
         const val MaxRecords = 30
         const val MaxFolderThumbnails = 160
+        const val SavedPasswordMarker = "__saved_password__"
     }
 }

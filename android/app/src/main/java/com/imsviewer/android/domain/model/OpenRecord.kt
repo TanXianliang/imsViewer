@@ -17,6 +17,7 @@ data class OpenRecord(
     val port: Int = 22,
     val username: String? = null,
     val password: String? = null,
+    val hasSavedPassword: Boolean = false,
     val path: String? = null,
     val updatedAt: Long = System.currentTimeMillis()
 )

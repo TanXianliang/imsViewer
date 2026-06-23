@@ -49,6 +49,8 @@ import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Share
+import androidx.compose.material.icons.outlined.Visibility
+import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
@@ -68,7 +70,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -86,6 +87,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -116,6 +119,8 @@ fun MainScreen(
                 fileRecords = state.fileRecords,
                 folderRecords = state.folderRecords,
                 networkRecords = state.networkRecords,
+                selectedKind = state.homeTab,
+                onSelectKind = viewModel::selectHomeTab,
                 onOpenFile = onOpenFile,
                 onOpenFolder = onOpenFolder,
                 onOpenRecord = viewModel::openRecord,
@@ -434,6 +439,8 @@ private fun HomeScreen(
     fileRecords: List<OpenRecord>,
     folderRecords: List<OpenRecord>,
     networkRecords: List<OpenRecord>,
+    selectedKind: OpenRecordKind,
+    onSelectKind: (OpenRecordKind) -> Unit,
     onOpenFile: () -> Unit,
     onOpenFolder: () -> Unit,
     onOpenRecord: (OpenRecord) -> Unit,
@@ -442,14 +449,14 @@ private fun HomeScreen(
     onAddNetwork: (String, String, String, String, String, Boolean, String) -> Unit,
     onUpdateNetwork: (OpenRecord, String, String, String, String, String, Boolean, String) -> Unit
 ) {
-    var selectedTab by remember { mutableIntStateOf(0) }
     var isSettingsVisible by remember { mutableStateOf(false) }
     val tabs = listOf("Open File", "Open Folder", "Open Network")
     val kinds = listOf(OpenRecordKind.File, OpenRecordKind.Folder, OpenRecordKind.Network)
-    val records = when (selectedTab) {
-        0 -> fileRecords
-        1 -> folderRecords
-        else -> networkRecords
+    val selectedTab = kinds.indexOf(selectedKind).takeIf { it >= 0 } ?: 0
+    val records = when (selectedKind) {
+        OpenRecordKind.File -> fileRecords
+        OpenRecordKind.Folder -> folderRecords
+        OpenRecordKind.Network -> networkRecords
     }
 
     Column(
@@ -476,7 +483,7 @@ private fun HomeScreen(
             tabs.forEachIndexed { index, title ->
                 Tab(
                     selected = selectedTab == index,
-                    onClick = { selectedTab = index },
+                    onClick = { onSelectKind(kinds[index]) },
                     text = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) }
                 )
             }
@@ -487,17 +494,35 @@ private fun HomeScreen(
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             when (selectedTab) {
-                0 -> Button(onClick = onOpenFile, modifier = Modifier.weight(1f)) {
+                0 -> Button(
+                    onClick = {
+                        onSelectKind(OpenRecordKind.File)
+                        onOpenFile()
+                    },
+                    modifier = Modifier.weight(1f)
+                ) {
                     Icon(Icons.Outlined.PhotoLibrary, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
                     Text("Open file")
                 }
-                1 -> Button(onClick = onOpenFolder, modifier = Modifier.weight(1f)) {
+                1 -> Button(
+                    onClick = {
+                        onSelectKind(OpenRecordKind.Folder)
+                        onOpenFolder()
+                    },
+                    modifier = Modifier.weight(1f)
+                ) {
                     Icon(Icons.Outlined.FolderOpen, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
                     Text("Open folder")
                 }
-                else -> Button(onClick = { isSettingsVisible = true }, modifier = Modifier.weight(1f)) {
+                else -> Button(
+                    onClick = {
+                        onSelectKind(OpenRecordKind.Network)
+                        isSettingsVisible = true
+                    },
+                    modifier = Modifier.weight(1f)
+                ) {
                     Icon(Icons.Outlined.Add, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
                     Text("Add network")
@@ -658,8 +683,9 @@ private fun HomeSettingsSheet(
     var host by remember(editRecord) { mutableStateOf(editRecord?.host.orEmpty()) }
     var port by remember(editRecord) { mutableStateOf(editRecord?.port?.toString() ?: "22") }
     var username by remember(editRecord) { mutableStateOf(editRecord?.username.orEmpty()) }
-    var password by remember(editRecord) { mutableStateOf(editRecord?.password.orEmpty()) }
-    var savePassword by remember(editRecord) { mutableStateOf(editRecord?.password != null) }
+    var password by remember(editRecord) { mutableStateOf("") }
+    var savePassword by remember(editRecord) { mutableStateOf(editRecord?.hasSavedPassword == true) }
+    var isPasswordVisible by remember(editRecord) { mutableStateOf(false) }
     var path by remember(editRecord) { mutableStateOf(editRecord?.path ?: "/") }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
@@ -714,8 +740,27 @@ private fun HomeSettingsSheet(
                     value = password,
                     onValueChange = { password = it },
                     label = { Text("Password") },
-                    placeholder = { Text(if (savePassword) "" else "Required when opening if not saved") },
+                    placeholder = {
+                        Text(
+                            when {
+                                editRecord?.hasSavedPassword == true && savePassword -> "Leave blank to keep saved password"
+                                savePassword -> "Saved securely on this device"
+                                else -> "Required when opening if not saved"
+                            }
+                        )
+                    },
                     singleLine = true,
+                    visualTransformation = if (isPasswordVisible) {
+                        VisualTransformation.None
+                    } else {
+                        PasswordVisualTransformation()
+                    },
+                    trailingIcon = {
+                        PasswordVisibilityButton(
+                            isVisible = isPasswordVisible,
+                            onToggle = { isPasswordVisible = !isPasswordVisible }
+                        )
+                    },
                     modifier = Modifier.fillMaxWidth()
                 )
                 Spacer(Modifier.height(10.dp))
@@ -777,9 +822,11 @@ private fun HomeSettingsSheet(
 private fun NetworkPasswordSheet(
     record: OpenRecord,
     onDismiss: () -> Unit,
-    onSubmit: (OpenRecord, String) -> Unit
+    onSubmit: (OpenRecord, String, Boolean) -> Unit
 ) {
     var password by remember(record.id) { mutableStateOf("") }
+    var savePassword by remember(record.id) { mutableStateOf(false) }
+    var isPasswordVisible by remember(record.id) { mutableStateOf(false) }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     ModalBottomSheet(
@@ -802,17 +849,46 @@ private fun NetworkPasswordSheet(
                 onValueChange = { password = it },
                 label = { Text("SFTP password") },
                 singleLine = true,
+                visualTransformation = if (isPasswordVisible) {
+                    VisualTransformation.None
+                } else {
+                    PasswordVisualTransformation()
+                },
+                trailingIcon = {
+                    PasswordVisibilityButton(
+                        isVisible = isPasswordVisible,
+                        onToggle = { isPasswordVisible = !isPasswordVisible }
+                    )
+                },
                 modifier = Modifier.fillMaxWidth()
             )
             Spacer(Modifier.height(12.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth().clickable { savePassword = !savePassword },
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Checkbox(checked = savePassword, onCheckedChange = { savePassword = it })
+                Text("Save password", color = Color.White, fontSize = 14.sp)
+            }
+            Spacer(Modifier.height(12.dp))
             Button(
-                onClick = { onSubmit(record, password) },
+                onClick = { onSubmit(record, password, savePassword) },
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text("Connect")
             }
             Spacer(Modifier.height(20.dp))
         }
+    }
+}
+
+@Composable
+private fun PasswordVisibilityButton(isVisible: Boolean, onToggle: () -> Unit) {
+    IconButton(onClick = onToggle) {
+        Icon(
+            imageVector = if (isVisible) Icons.Outlined.VisibilityOff else Icons.Outlined.Visibility,
+            contentDescription = if (isVisible) "Hide password" else "Show password"
+        )
     }
 }
 
