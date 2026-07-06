@@ -30,6 +30,8 @@ data class ViewerUiState(
     val remoteTitle: String? = null,
     val remotePath: String = "/",
     val remoteEntries: List<RemoteEntry> = emptyList(),
+    val remoteThumbnails: Map<String, Bitmap> = emptyMap(),
+    val failedRemoteThumbnails: Set<String> = emptySet(),
     val remoteBackStack: List<String> = emptyList(),
     val isRemoteBusy: Boolean = false,
     val passwordPromptRecord: OpenRecord? = null,

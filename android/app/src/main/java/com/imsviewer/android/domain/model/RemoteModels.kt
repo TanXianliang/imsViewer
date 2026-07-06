@@ -14,7 +14,8 @@ data class RemoteEntry(
     val name: String,
     val path: String,
     val isDirectory: Boolean,
-    val sizeBytes: Long = 0L
+    val sizeBytes: Long = 0L,
+    val modifiedTimeSeconds: Long = 0L
 )
 
 data class RemoteDownload(

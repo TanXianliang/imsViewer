@@ -1,6 +1,8 @@
 package com.imsviewer.android.data
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import com.imsviewer.android.domain.model.RemoteConnection
 import com.imsviewer.android.domain.model.RemoteDownload
@@ -30,13 +32,15 @@ class SftpRepository(private val context: Context) {
                                 name = entry.filename,
                                 path = childPath,
                                 isDirectory = true,
-                                sizeBytes = 0L
+                                sizeBytes = 0L,
+                                modifiedTimeSeconds = entry.attrs.mTime.toLong()
                             )
                             isSupportedRemoteFile(entry.filename) -> RemoteEntry(
                                 name = entry.filename,
                                 path = childPath,
                                 isDirectory = false,
-                                sizeBytes = entry.attrs.size
+                                sizeBytes = entry.attrs.size,
+                                modifiedTimeSeconds = entry.attrs.mTime.toLong()
                             )
                             else -> null
                         }
@@ -67,9 +71,30 @@ class SftpRepository(private val context: Context) {
         }
 
     suspend fun clearCache() = withContext(Dispatchers.IO) {
-        sftpCacheDir().listFiles()?.forEach { file ->
-            if (file.isFile) file.delete()
+        clearFiles(sftpCacheDir())
+        clearFiles(sftpThumbnailCacheDir())
+    }
+
+    suspend fun makeThumbnail(connection: RemoteConnection, entry: RemoteEntry, targetMaxSize: Int): Bitmap =
+        withContext(Dispatchers.IO) {
+            require(canMakeThumbnail(entry)) { "Remote thumbnail is not supported" }
+            val cacheDir = sftpThumbnailCacheDir()
+            cacheDir.mkdirs()
+            val localFile = File(cacheDir, thumbnailFileName(connection, entry))
+            if (localFile.exists() && localFile.length() > 0L) {
+                return@withContext runCatching { decodeThumbnail(localFile, targetMaxSize) }
+                    .getOrElse {
+                        localFile.delete()
+                        fetchAndCacheThumbnail(connection, entry, localFile, targetMaxSize)
+                    }
+            }
+            fetchAndCacheThumbnail(connection, entry, localFile, targetMaxSize)
         }
+
+    fun canMakeThumbnail(entry: RemoteEntry): Boolean {
+        return !entry.isDirectory &&
+            entry.sizeBytes in 1..MaxRemoteThumbnailSourceBytes &&
+            isPlainImageFile(entry.name)
     }
 
     private fun trimCache(maxCacheBytes: Long, keepFile: File) {
@@ -90,6 +115,70 @@ class SftpRepository(private val context: Context) {
     }
 
     private fun sftpCacheDir(): File = File(context.cacheDir, "sftp")
+
+    private fun sftpThumbnailCacheDir(): File = File(context.cacheDir, "sftp_thumbnails")
+
+    private fun clearFiles(directory: File) {
+        directory.listFiles()?.forEach { file ->
+            if (file.isFile) file.delete()
+        }
+    }
+
+    private fun thumbnailFileName(connection: RemoteConnection, entry: RemoteEntry): String {
+        val key = "${connection.username}@${connection.host}:${connection.port}:${entry.path}:${entry.sizeBytes}:${entry.modifiedTimeSeconds}"
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(key.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+        return "$digest.jpg"
+    }
+
+    private fun fetchAndCacheThumbnail(
+        connection: RemoteConnection,
+        entry: RemoteEntry,
+        thumbnailFile: File,
+        targetMaxSize: Int
+    ): Bitmap {
+        val sourceFile = File.createTempFile("remote_thumb_", ".tmp", sftpThumbnailCacheDir())
+        return try {
+            withSftp(connection) { sftp ->
+                sourceFile.outputStream().use { output ->
+                    sftp.get(entry.path, output)
+                }
+            }
+            val bitmap = decodeThumbnail(sourceFile, targetMaxSize)
+            thumbnailFile.outputStream().use { output ->
+                check(bitmap.compress(Bitmap.CompressFormat.JPEG, ThumbnailJpegQuality, output)) {
+                    "Cannot encode remote thumbnail"
+                }
+            }
+            bitmap
+        } finally {
+            sourceFile.delete()
+        }
+    }
+
+    private fun decodeThumbnail(file: File, targetMaxSize: Int): Bitmap {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        file.inputStream().use { BitmapFactory.decodeStream(it, null, bounds) }
+        val options = BitmapFactory.Options().apply {
+            inSampleSize = calculateInSampleSize(bounds.outWidth, bounds.outHeight, targetMaxSize)
+        }
+        return file.inputStream().use { stream ->
+            BitmapFactory.decodeStream(stream, null, options)
+        } ?: error("Cannot decode remote thumbnail")
+    }
+
+    private fun calculateInSampleSize(width: Int, height: Int, targetMaxSize: Int): Int {
+        var sample = 1
+        var currentWidth = width
+        var currentHeight = height
+        while (currentWidth / 2 >= targetMaxSize || currentHeight / 2 >= targetMaxSize) {
+            sample *= 2
+            currentWidth /= 2
+            currentHeight /= 2
+        }
+        return sample
+    }
 
     private fun <T> withSftp(connection: RemoteConnection, block: (ChannelSftp) -> T): T {
         val session = JSch().getSession(connection.username, connection.host, connection.port)
@@ -124,7 +213,20 @@ class SftpRepository(private val context: Context) {
             lower.endsWith(".avif")
     }
 
+    private fun isPlainImageFile(name: String): Boolean {
+        val lower = name.lowercase(Locale.US)
+        return !lower.endsWith(".ims") &&
+            !lower.contains(".ims.") &&
+            (lower.endsWith(".jpg") ||
+                lower.endsWith(".jpeg") ||
+                lower.endsWith(".png") ||
+                lower.endsWith(".webp") ||
+                lower.endsWith(".avif"))
+    }
+
     private companion object {
         const val ConnectTimeoutMs = 15_000
+        const val MaxRemoteThumbnailSourceBytes = 20L * 1024L * 1024L
+        const val ThumbnailJpegQuality = 82
     }
 }

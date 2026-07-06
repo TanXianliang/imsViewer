@@ -35,6 +35,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
     private var loadJob: Job? = null
     private var thumbnailJob: Job? = null
     private var folderThumbnailJob: Job? = null
+    private var remoteThumbnailJob: Job? = null
     private val sessionPasswords = mutableMapOf<String, String>()
 
     init {
@@ -180,6 +181,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
     fun showHome() {
         loadJob?.cancel()
         folderThumbnailJob?.cancel()
+        remoteThumbnailJob?.cancel()
         _uiState.update {
             it.copy(
                 screenState = ScreenState.Empty,
@@ -194,6 +196,8 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
                 remoteTitle = null,
                 remotePath = "/",
                 remoteEntries = emptyList(),
+                remoteThumbnails = emptyMap(),
+                failedRemoteThumbnails = emptySet(),
                 remoteBackStack = emptyList(),
                 isRemoteBusy = false,
                 passwordPromptRecord = null,
@@ -389,6 +393,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
         popBackStack: Boolean = false
     ) {
         loadJob?.cancel()
+        remoteThumbnailJob?.cancel()
         val previousState = _uiState.value
         loadJob = viewModelScope.launch {
             _uiState.update {
@@ -398,6 +403,8 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
                     remoteConnection = connection,
                     remoteTitle = title,
                     remotePath = path,
+                    remoteThumbnails = emptyMap(),
+                    failedRemoteThumbnails = emptySet(),
                     isRemoteBusy = true,
                     isHomeVisible = false,
                     errorMessage = null
@@ -417,10 +424,13 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
                             remoteEntries = entries,
                             remotePath = path,
                             remoteBackStack = nextBackStack,
+                            remoteThumbnails = emptyMap(),
+                            failedRemoteThumbnails = emptySet(),
                             isRemoteBusy = false,
                             errorMessage = null
                         )
                     }
+                    loadRemoteThumbnails(connection, entries)
                 }
                 .onFailure { error ->
                     _uiState.update {
@@ -436,6 +446,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun downloadRemoteFile(connection: RemoteConnection, entry: RemoteEntry) {
         loadJob?.cancel()
+        remoteThumbnailJob?.cancel()
         loadJob = viewModelScope.launch {
             _uiState.update {
                 it.copy(isRemoteBusy = true, errorMessage = null, loadingMessage = "Downloading ${entry.name}")
@@ -922,14 +933,57 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    private fun loadRemoteThumbnails(connection: RemoteConnection, entries: List<RemoteEntry>) {
+        remoteThumbnailJob?.cancel()
+        val candidates = entries.filter { sftpRepository.canMakeThumbnail(it) }
+        if (candidates.isEmpty()) return
+        remoteThumbnailJob = viewModelScope.launch {
+            candidates.forEach { entry ->
+                val state = _uiState.value
+                if (state.remoteConnection != connection || state.remoteEntries.none { it.path == entry.path }) {
+                    return@launch
+                }
+                if (state.remoteThumbnails.containsKey(entry.path) || state.failedRemoteThumbnails.contains(entry.path)) {
+                    return@forEach
+                }
+                runCatching { sftpRepository.makeThumbnail(connection, entry, RemoteThumbnailSizePx) }
+                    .onSuccess { bitmap ->
+                        _uiState.update { current ->
+                            if (current.remoteConnection == connection) {
+                                current.copy(remoteThumbnails = trimRemoteThumbnailCache(current.remoteThumbnails + (entry.path to bitmap)))
+                            } else {
+                                current
+                            }
+                        }
+                    }
+                    .onFailure {
+                        _uiState.update { current ->
+                            if (current.remoteConnection == connection) {
+                                current.copy(failedRemoteThumbnails = current.failedRemoteThumbnails + entry.path)
+                            } else {
+                                current
+                            }
+                        }
+                    }
+            }
+        }
+    }
+
     private fun trimFolderThumbnailCache(cache: Map<Uri, android.graphics.Bitmap>): Map<Uri, android.graphics.Bitmap> {
         if (cache.size <= MaxFolderThumbnails) return cache
         return cache.entries.toList().takeLast(MaxFolderThumbnails).associate { it.toPair() }
     }
 
+    private fun trimRemoteThumbnailCache(cache: Map<String, android.graphics.Bitmap>): Map<String, android.graphics.Bitmap> {
+        if (cache.size <= MaxRemoteThumbnails) return cache
+        return cache.entries.toList().takeLast(MaxRemoteThumbnails).associate { it.toPair() }
+    }
+
     private companion object {
         const val MaxRecords = 30
         const val MaxFolderThumbnails = 160
+        const val MaxRemoteThumbnails = 160
+        const val RemoteThumbnailSizePx = 180
         const val SavedPasswordMarker = "__saved_password__"
         const val NetworkCacheLimitMbKey = "network_cache_limit_mb"
         const val DefaultNetworkCacheLimitMb = 512

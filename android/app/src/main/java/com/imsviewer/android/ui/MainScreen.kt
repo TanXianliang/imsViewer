@@ -138,6 +138,8 @@ fun MainScreen(
                     title = state.remoteTitle ?: "SFTP",
                     path = state.remotePath,
                     entries = state.remoteEntries,
+                    thumbnails = state.remoteThumbnails,
+                    failedThumbnails = state.failedRemoteThumbnails,
                     isBusy = state.isRemoteBusy,
                     onBack = viewModel::navigateRemoteBack,
                     onHome = viewModel::showHome,
@@ -239,6 +241,8 @@ private fun RemoteBrowserScreen(
     title: String,
     path: String,
     entries: List<RemoteEntry>,
+    thumbnails: Map<String, Bitmap>,
+    failedThumbnails: Set<String>,
     isBusy: Boolean,
     onBack: () -> Unit,
     onHome: () -> Unit,
@@ -294,7 +298,12 @@ private fun RemoteBrowserScreen(
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 items(entries, key = { it.path }) { entry ->
-                    RemoteEntryRow(entry = entry, onClick = { onOpenEntry(entry) })
+                    RemoteEntryRow(
+                        entry = entry,
+                        thumbnail = thumbnails[entry.path],
+                        thumbnailFailed = entry.path in failedThumbnails,
+                        onClick = { onOpenEntry(entry) }
+                    )
                 }
             }
         }
@@ -302,7 +311,12 @@ private fun RemoteBrowserScreen(
 }
 
 @Composable
-private fun RemoteEntryRow(entry: RemoteEntry, onClick: () -> Unit) {
+private fun RemoteEntryRow(
+    entry: RemoteEntry,
+    thumbnail: Bitmap?,
+    thumbnailFailed: Boolean,
+    onClick: () -> Unit
+) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color = Color(0xFF19191E),
@@ -312,12 +326,7 @@ private fun RemoteEntryRow(entry: RemoteEntry, onClick: () -> Unit) {
             modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 12.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(
-                imageVector = if (entry.isDirectory) Icons.Outlined.FolderOpen else Icons.Outlined.PhotoLibrary,
-                contentDescription = null,
-                tint = Color.White,
-                modifier = Modifier.size(22.dp)
-            )
+            RemoteEntryThumb(entry = entry, thumbnail = thumbnail, thumbnailFailed = thumbnailFailed)
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(entry.name, color = Color.White, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -560,6 +569,37 @@ private fun HomeScreen(
             onUpdateNetworkCacheLimit = onUpdateNetworkCacheLimit,
             onClearNetworkCache = onClearNetworkCache
         )
+    }
+}
+
+@Composable
+private fun RemoteEntryThumb(entry: RemoteEntry, thumbnail: Bitmap?, thumbnailFailed: Boolean) {
+    Box(
+        modifier = Modifier
+            .size(48.dp)
+            .background(Color(0xFF232329)),
+        contentAlignment = Alignment.Center
+    ) {
+        when {
+            thumbnail != null -> Image(
+                bitmap = thumbnail.asImageBitmap(),
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop
+            )
+            thumbnailFailed || entry.isDirectory -> Icon(
+                imageVector = if (entry.isDirectory) Icons.Outlined.FolderOpen else Icons.Outlined.PhotoLibrary,
+                contentDescription = null,
+                tint = Color.White,
+                modifier = Modifier.size(22.dp)
+            )
+            else -> Icon(
+                imageVector = Icons.Outlined.PhotoLibrary,
+                contentDescription = null,
+                tint = Color(0xFFB8B8B8),
+                modifier = Modifier.size(22.dp)
+            )
+        }
     }
 }
 
