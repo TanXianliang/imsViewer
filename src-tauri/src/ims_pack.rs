@@ -5,7 +5,7 @@
 use byteorder::{LittleEndian, WriteBytesExt};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -36,6 +36,16 @@ pub struct BatchConfig {
     pub preserve_structure: bool,
 }
 
+/// 批量解压配置（从前端传入）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchExtractConfig {
+    pub input_dir: String,
+    pub depth: u32,
+    pub output_dir: String,
+    pub preserve_structure: bool,
+    pub multi_threaded: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FolderConfig {
     pub path: String,
@@ -54,13 +64,20 @@ pub struct ProgressPayload {
 // ---- IMS 打包 ----
 
 /// 将多张图片打包为单个 IMS 文件
-pub fn pack_ims(image_paths: &[String], cover_index: usize, output_path: &str) -> Result<(), String> {
+pub fn pack_ims(
+    image_paths: &[String],
+    cover_index: usize,
+    output_path: &str,
+) -> Result<(), String> {
     let count = image_paths.len();
     if count == 0 {
         return Err("图片列表为空".into());
     }
     if cover_index >= count {
-        return Err(format!("封面索引 {} 超出范围 (共 {} 张)", cover_index, count));
+        return Err(format!(
+            "封面索引 {} 超出范围 (共 {} 张)",
+            cover_index, count
+        ));
     }
 
     // 验证并读取所有图片
@@ -77,7 +94,8 @@ pub fn pack_ims(image_paths: &[String], cover_index: usize, output_path: &str) -
         if !p.exists() {
             return Err(format!("文件不存在: {}", path));
         }
-        let ext = p.extension()
+        let ext = p
+            .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_lowercase();
@@ -86,37 +104,59 @@ pub fn pack_ims(image_paths: &[String], cover_index: usize, output_path: &str) -
             "png" => 1,
             "webp" => 2,
             "avif" => 3,
-            _ => return Err(format!("不支持的图片格式: {} (仅支持 jpg/jpeg/png/webp/avif)", path)),
+            _ => {
+                return Err(format!(
+                    "不支持的图片格式: {} (仅支持 jpg/jpeg/png/webp/avif)",
+                    path
+                ))
+            }
         };
         if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
             if stem.to_lowercase().contains(".ims") {
                 return Err(format!("不能将已是 IMS 的文件作为源: {}", path));
             }
         }
-        let filename = p.file_name()
+        let filename = p
+            .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("unknown")
             .to_string();
-        let raw_bytes = std::fs::read(path)
-            .map_err(|e| format!("读取文件失败 {}: {}", path, e))?;
+        let raw_bytes = std::fs::read(path).map_err(|e| format!("读取文件失败 {}: {}", path, e))?;
 
         // WebP/AVIF → 自动转 PNG
         let (final_bytes, final_format, final_filename) = if format == 2 || format == 3 {
-            let img = image::load_from_memory(&raw_bytes)
-                .map_err(|e| format!("解码 {} 失败: {} (格式: {})", path, e, if format == 2 { "WebP" } else { "AVIF" }))?;
+            let img = image::load_from_memory(&raw_bytes).map_err(|e| {
+                format!(
+                    "解码 {} 失败: {} (格式: {})",
+                    path,
+                    e,
+                    if format == 2 { "WebP" } else { "AVIF" }
+                )
+            })?;
             let mut png_bytes = Vec::new();
-            img.write_to(&mut std::io::Cursor::new(&mut png_bytes), image::ImageFormat::Png)
-                .map_err(|e| format!("PNG 编码失败 {}: {}", path, e))?;
+            img.write_to(
+                &mut std::io::Cursor::new(&mut png_bytes),
+                image::ImageFormat::Png,
+            )
+            .map_err(|e| format!("PNG 编码失败 {}: {}", path, e))?;
             let new_name = format!(
                 "{}.png",
-                Path::new(&filename).file_stem().and_then(|s| s.to_str()).unwrap_or("image")
+                Path::new(&filename)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("image")
             );
             (png_bytes, 1u8, new_name)
         } else {
             (raw_bytes, format, filename)
         };
 
-        entries.push(Entry { filename: final_filename, format: final_format, bytes: final_bytes, is_cover: i == cover_index });
+        entries.push(Entry {
+            filename: final_filename,
+            format: final_format,
+            bytes: final_bytes,
+            is_cover: i == cover_index,
+        });
     }
 
     // 封面排在第一位
@@ -148,31 +188,44 @@ pub fn pack_ims(image_paths: &[String], cover_index: usize, output_path: &str) -
     }
 
     // 2. 写入 index footer
-    out.write_all(MAGIC).map_err(|e| format!("写入 magic 失败: {}", e))?;
-    out.write_u16::<LittleEndian>(VERSION).map_err(|e| format!("写入 version 失败: {}", e))?;
-    out.write_u32::<LittleEndian>(count as u32).map_err(|e| format!("写入 image_count 失败: {}", e))?;
-    out.write_u32::<LittleEndian>(0).map_err(|e| format!("写入 data_start 失败: {}", e))?;
+    out.write_all(MAGIC)
+        .map_err(|e| format!("写入 magic 失败: {}", e))?;
+    out.write_u16::<LittleEndian>(VERSION)
+        .map_err(|e| format!("写入 version 失败: {}", e))?;
+    out.write_u32::<LittleEndian>(count as u32)
+        .map_err(|e| format!("写入 image_count 失败: {}", e))?;
+    out.write_u32::<LittleEndian>(0)
+        .map_err(|e| format!("写入 data_start 失败: {}", e))?;
 
     // 3. 写入每个 entry (v2: 带 SHA-256 hash)
     for (i, entry) in entries.iter().enumerate() {
         let name_bytes = entry.filename.as_bytes();
-        out.write_u16::<LittleEndian>(name_bytes.len() as u16).map_err(|e| format!("写入 name_len 失败: {}", e))?;
-        out.write_all(name_bytes).map_err(|e| format!("写入 name 失败: {}", e))?;
-        out.write_u8(entry.format).map_err(|e| format!("写入 format 失败: {}", e))?;
-        out.write_u32::<LittleEndian>(offsets[i]).map_err(|e| format!("写入 offset 失败: {}", e))?;
-        out.write_u32::<LittleEndian>(entry.bytes.len() as u32).map_err(|e| format!("写入 length 失败: {}", e))?;
-        out.write_u8(if entry.is_cover { 1 } else { 0 }).map_err(|e| format!("写入 is_cover 失败: {}", e))?;
+        out.write_u16::<LittleEndian>(name_bytes.len() as u16)
+            .map_err(|e| format!("写入 name_len 失败: {}", e))?;
+        out.write_all(name_bytes)
+            .map_err(|e| format!("写入 name 失败: {}", e))?;
+        out.write_u8(entry.format)
+            .map_err(|e| format!("写入 format 失败: {}", e))?;
+        out.write_u32::<LittleEndian>(offsets[i])
+            .map_err(|e| format!("写入 offset 失败: {}", e))?;
+        out.write_u32::<LittleEndian>(entry.bytes.len() as u32)
+            .map_err(|e| format!("写入 length 失败: {}", e))?;
+        out.write_u8(if entry.is_cover { 1 } else { 0 })
+            .map_err(|e| format!("写入 is_cover 失败: {}", e))?;
 
         // v2: SHA-256 hash
         let mut hasher = Sha256::new();
         hasher.update(&entry.bytes);
         let hash = hasher.finalize();
-        out.write_u8(HASH_ALGO_SHA256).map_err(|e| format!("写入 hash_algo 失败: {}", e))?;
-        out.write_all(&hash).map_err(|e| format!("写入 hash 失败: {}", e))?;
+        out.write_u8(HASH_ALGO_SHA256)
+            .map_err(|e| format!("写入 hash_algo 失败: {}", e))?;
+        out.write_all(&hash)
+            .map_err(|e| format!("写入 hash 失败: {}", e))?;
     }
 
     // 4. 写入 index_offset
-    out.write_u32::<LittleEndian>(index_offset).map_err(|e| format!("写入 index_offset 失败: {}", e))?;
+    out.write_u32::<LittleEndian>(index_offset)
+        .map_err(|e| format!("写入 index_offset 失败: {}", e))?;
 
     Ok(())
 }
@@ -195,15 +248,19 @@ pub fn scan_and_group(input_folder: &str, max_depth: u32) -> Result<Vec<ImageGro
     if max_depth > 0 {
         walker = walker.max_depth(max_depth as usize);
     }
-    for entry in walker.into_iter().filter_map(|e| e.ok())
-    {
+    for entry in walker.into_iter().filter_map(|e| e.ok()) {
         if !entry.file_type().is_file() {
             continue;
         }
         let path = entry.path();
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
             let lower = ext.to_lowercase();
-            if lower == "jpg" || lower == "jpeg" || lower == "png" || lower == "webp" || lower == "avif" {
+            if lower == "jpg"
+                || lower == "jpeg"
+                || lower == "png"
+                || lower == "webp"
+                || lower == "avif"
+            {
                 // 跳过已经是 IMS 的文件
                 if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                     if stem.to_lowercase().contains(".ims") {
@@ -228,7 +285,9 @@ pub fn scan_and_group(input_folder: &str, max_depth: u32) -> Result<Vec<ImageGro
             // 子图: {base}_XXXXX_
             let base_name = caps.get(1).unwrap().as_str().to_string();
             let seq: u32 = caps.get(2).unwrap().as_str().parse().unwrap_or(0);
-            let entry = groups.entry(base_name).or_insert_with(|| (None, Vec::new(), None));
+            let entry = groups
+                .entry(base_name)
+                .or_insert_with(|| (None, Vec::new(), None));
             entry.1.push((seq, path.clone()));
             if entry.2.is_none() {
                 entry.2 = Some(parent_dir.clone());
@@ -236,7 +295,9 @@ pub fn scan_and_group(input_folder: &str, max_depth: u32) -> Result<Vec<ImageGro
         } else {
             // 封面: {base}.{ext}
             let base_name = stem.to_string();
-            let entry = groups.entry(base_name).or_insert_with(|| (None, Vec::new(), None));
+            let entry = groups
+                .entry(base_name)
+                .or_insert_with(|| (None, Vec::new(), None));
             entry.0 = Some(path.clone());
             if entry.2.is_none() {
                 entry.2 = Some(parent_dir.clone());
@@ -322,10 +383,8 @@ pub fn upgrade_ims_file(filepath: &str) -> Result<(), String> {
     // 写入临时文件，然后替换
     let tmp_path = format!("{}.tmp_upgrade", filepath);
     write_ims_entries(&tmp_path, &entries)?;
-    std::fs::remove_file(filepath)
-        .map_err(|e| format!("删除旧文件失败: {}", e))?;
-    std::fs::rename(&tmp_path, filepath)
-        .map_err(|e| format!("替换文件失败: {}", e))?;
+    std::fs::remove_file(filepath).map_err(|e| format!("删除旧文件失败: {}", e))?;
+    std::fs::rename(&tmp_path, filepath).map_err(|e| format!("替换文件失败: {}", e))?;
 
     Ok(())
 }
@@ -341,11 +400,22 @@ pub fn scan_ims_files(dir: &str, max_depth: u32) -> Vec<String> {
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
         .filter(|e| {
-            if let Some(stem) = e.path().file_stem().and_then(|s| s.to_str()) {
-                stem.to_lowercase().contains(".ims")
-            } else {
-                false
-            }
+            let name = e
+                .path()
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            [
+                ".ims",
+                ".ims.jpg",
+                ".ims.jpeg",
+                ".ims.png",
+                ".ims.webp",
+                ".ims.avif",
+            ]
+            .iter()
+            .any(|suffix| name.ends_with(suffix))
         })
         .map(|e| e.path().to_string_lossy().to_string())
         .collect()
@@ -366,35 +436,48 @@ fn write_ims_entries(output_path: &str, entries: &[UpEntry]) -> Result<(), Strin
         std::fs::create_dir_all(parent).ok();
     }
 
-    let mut out = std::fs::File::create(output_path)
-        .map_err(|e| format!("创建文件失败: {}", e))?;
+    let mut out = std::fs::File::create(output_path).map_err(|e| format!("创建文件失败: {}", e))?;
 
     for e in entries {
-        out.write_all(&e.bytes).map_err(|e| format!("写入数据失败: {}", e))?;
+        out.write_all(&e.bytes)
+            .map_err(|e| format!("写入数据失败: {}", e))?;
     }
 
-    out.write_all(MAGIC).map_err(|e| format!("写入 magic 失败: {}", e))?;
-    out.write_u16::<LittleEndian>(VERSION).map_err(|e| format!("写入 version 失败: {}", e))?;
-    out.write_u32::<LittleEndian>(count as u32).map_err(|e| format!("写入 count 失败: {}", e))?;
-    out.write_u32::<LittleEndian>(0).map_err(|e| format!("写入 data_start 失败: {}", e))?;
+    out.write_all(MAGIC)
+        .map_err(|e| format!("写入 magic 失败: {}", e))?;
+    out.write_u16::<LittleEndian>(VERSION)
+        .map_err(|e| format!("写入 version 失败: {}", e))?;
+    out.write_u32::<LittleEndian>(count as u32)
+        .map_err(|e| format!("写入 count 失败: {}", e))?;
+    out.write_u32::<LittleEndian>(0)
+        .map_err(|e| format!("写入 data_start 失败: {}", e))?;
 
     for (i, e) in entries.iter().enumerate() {
         let name_bytes = e.filename.as_bytes();
-        out.write_u16::<LittleEndian>(name_bytes.len() as u16).map_err(|e| format!("写入 name_len 失败: {}", e))?;
-        out.write_all(name_bytes).map_err(|e| format!("写入 name 失败: {}", e))?;
-        out.write_u8(e.format).map_err(|e| format!("写入 format 失败: {}", e))?;
-        out.write_u32::<LittleEndian>(offsets[i]).map_err(|e| format!("写入 offset 失败: {}", e))?;
-        out.write_u32::<LittleEndian>(e.bytes.len() as u32).map_err(|e| format!("写入 length 失败: {}", e))?;
-        out.write_u8(if e.is_cover { 1 } else { 0 }).map_err(|e| format!("写入 is_cover 失败: {}", e))?;
+        out.write_u16::<LittleEndian>(name_bytes.len() as u16)
+            .map_err(|e| format!("写入 name_len 失败: {}", e))?;
+        out.write_all(name_bytes)
+            .map_err(|e| format!("写入 name 失败: {}", e))?;
+        out.write_u8(e.format)
+            .map_err(|e| format!("写入 format 失败: {}", e))?;
+        out.write_u32::<LittleEndian>(offsets[i])
+            .map_err(|e| format!("写入 offset 失败: {}", e))?;
+        out.write_u32::<LittleEndian>(e.bytes.len() as u32)
+            .map_err(|e| format!("写入 length 失败: {}", e))?;
+        out.write_u8(if e.is_cover { 1 } else { 0 })
+            .map_err(|e| format!("写入 is_cover 失败: {}", e))?;
 
         let mut hasher = Sha256::new();
         hasher.update(&e.bytes);
         let hash = hasher.finalize();
-        out.write_u8(HASH_ALGO_SHA256).map_err(|e| format!("写入 hash_algo 失败: {}", e))?;
-        out.write_all(&hash).map_err(|e| format!("写入 hash 失败: {}", e))?;
+        out.write_u8(HASH_ALGO_SHA256)
+            .map_err(|e| format!("写入 hash_algo 失败: {}", e))?;
+        out.write_all(&hash)
+            .map_err(|e| format!("写入 hash 失败: {}", e))?;
     }
 
-    out.write_u32::<LittleEndian>(index_offset).map_err(|e| format!("写入 index_offset 失败: {}", e))?;
+    out.write_u32::<LittleEndian>(index_offset)
+        .map_err(|e| format!("写入 index_offset 失败: {}", e))?;
 
     Ok(())
 }
@@ -418,15 +501,12 @@ pub fn save_ims_entries_atomic(output_path: &str, entries: &[UpEntry]) -> Result
             std::fs::create_dir_all(parent).ok();
         }
         let tmp = format!("{}.tmp", output_path);
-        std::fs::write(&tmp, &entries[0].bytes)
-            .map_err(|e| format!("写入临时文件失败: {}", e))?;
+        std::fs::write(&tmp, &entries[0].bytes).map_err(|e| format!("写入临时文件失败: {}", e))?;
         // 原子替换
         if Path::new(output_path).exists() {
-            std::fs::remove_file(output_path)
-                .map_err(|e| format!("删除旧文件失败: {}", e))?;
+            std::fs::remove_file(output_path).map_err(|e| format!("删除旧文件失败: {}", e))?;
         }
-        std::fs::rename(&tmp, output_path)
-            .map_err(|e| format!("重命名临时文件失败: {}", e))?;
+        std::fs::rename(&tmp, output_path).map_err(|e| format!("重命名临时文件失败: {}", e))?;
         return Ok(());
     }
 
@@ -435,11 +515,9 @@ pub fn save_ims_entries_atomic(output_path: &str, entries: &[UpEntry]) -> Result
 
     // 原子替换：先删后改名
     if Path::new(output_path).exists() {
-        std::fs::remove_file(output_path)
-            .map_err(|e| format!("删除旧文件失败: {}", e))?;
+        std::fs::remove_file(output_path).map_err(|e| format!("删除旧文件失败: {}", e))?;
     }
-    std::fs::rename(&tmp, output_path)
-        .map_err(|e| format!("重命名临时文件失败: {}", e))?;
+    std::fs::rename(&tmp, output_path).map_err(|e| format!("重命名临时文件失败: {}", e))?;
 
     Ok(())
 }
@@ -472,15 +550,23 @@ pub fn compute_output_path(
             let input_base = Path::new(&group.input_folder)
                 .parent()
                 .unwrap_or(Path::new(&group.input_folder));
-            let rel = group.source_dir
+            let rel = group
+                .source_dir
                 .strip_prefix(input_base)
                 .unwrap_or(&group.source_dir);
             let out_path = Path::new(out_dir).join(rel).join(&output_filename);
             out_path.to_string_lossy().to_string()
         } else {
-            Path::new(out_dir).join(&output_filename).to_string_lossy().to_string()
+            Path::new(out_dir)
+                .join(&output_filename)
+                .to_string_lossy()
+                .to_string()
         }
     } else {
-        group.source_dir.join(&output_filename).to_string_lossy().to_string()
+        group
+            .source_dir
+            .join(&output_filename)
+            .to_string_lossy()
+            .to_string()
     }
 }

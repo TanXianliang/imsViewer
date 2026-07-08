@@ -584,6 +584,16 @@ body {
   white-space: nowrap;
 }
 .output-dir-row .path-input { flex: 1; }
+.output-dir-row .depth-input {
+  width: 80px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  padding: 4px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  text-align: center;
+}
 .output-dir-row .btn-browse {
   background: var(--bg-hover);
   color: var(--text-primary);

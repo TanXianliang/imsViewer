@@ -48,6 +48,7 @@
             <div class="menu-action" data-action="export-current">导出当前图片... <span>Ctrl+E</span></div>
             <div class="menu-action" data-action="export-all">导出全部子图... <span>Ctrl+Shift+E</span></div>
             <div class="menu-separator"></div>
+            <div class="menu-action" data-action="batch-extract">批量解压 IMS...</div>
             <div class="menu-action" data-action="batch-convert">批量转换...</div>
             <div class="menu-action" data-action="batch-upgrade">批量升级 IMS 版本...</div>
             <div class="menu-separator"></div>
@@ -170,6 +171,46 @@
       <div class="modal-footer">
         <button id="btn-start-convert" class="btn-primary">开始转换</button>
         <button id="btn-cancel-convert" class="btn-secondary">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 批量解压模态框 -->
+  <div id="extract-modal" class="modal-overlay" style="display:none">
+    <div class="modal-container">
+      <div class="modal-header">
+        <span>批量解压 IMS</span>
+        <button class="btn-modal-close" id="btn-extract-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="output-dir-row">
+          <label>输入目录</label>
+          <input class="path-input" id="extract-dir-input" type="text" placeholder="选择包含 IMS 文件的文件夹..." />
+          <button class="btn-browse" id="btn-browse-extract">浏览</button>
+        </div>
+        <div class="output-dir-row">
+          <label>扫描深度</label>
+          <input class="depth-input" id="extract-depth-input" type="number" min="0" max="100" value="0" title="0=无限深度" />
+        </div>
+        <div class="output-dir-row">
+          <label>输出目录</label>
+          <input class="path-input" id="extract-output-dir-input" type="text" placeholder="选择解压输出目录..." />
+          <button class="btn-browse" id="btn-browse-extract-output">浏览</button>
+        </div>
+        <div class="modal-options">
+          <label><input type="checkbox" id="chk-extract-preserve-structure" checked> 保持目录结构</label>
+          <label><input type="checkbox" id="chk-extract-multi"> 多线程</label>
+        </div>
+        <div class="progress-section">
+          <div class="progress-bar-container">
+            <div class="progress-bar-fill" id="extract-progress-fill"></div>
+          </div>
+          <div class="progress-text" id="extract-progress-text">准备就绪</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-start-extract" class="btn-primary">开始解压</button>
+        <button id="btn-cancel-extract" class="btn-secondary">关闭</button>
       </div>
     </div>
   </div>

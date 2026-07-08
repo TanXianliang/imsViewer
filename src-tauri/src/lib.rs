@@ -6,10 +6,11 @@
 //!   get_sub_image()    — 获取当前 IMS 文件的指定子图数据
 //!   extract_image()    — 导出单张图片
 //!   extract_all()      — 导出全部子图
+//!   start_batch_extract() — 目录级批量解压 IMS
 
 use base64::Engine;
-use std::collections::HashMap;
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
 use tauri::Emitter;
@@ -17,8 +18,14 @@ use tauri::Emitter;
 mod ims;
 mod ims_pack;
 
-use ims::{parse_ims, parse_ims_and_read_cover, read_sub_image, is_ims_file, file_type_label, FilePayload, SubImagePayload, SaveImagePayload, FolderEntry};
-use ims_pack::{pack_ims, scan_multiple_folders, compute_output_path, upgrade_ims_file, scan_ims_files, save_ims_entries_atomic, UpEntry, BatchConfig, ProgressPayload};
+use ims::{
+    file_type_label, is_ims_file, parse_ims, parse_ims_and_read_cover, read_sub_image, FilePayload,
+    FolderEntry, SaveImagePayload, SubImagePayload,
+};
+use ims_pack::{
+    compute_output_path, pack_ims, save_ims_entries_atomic, scan_ims_files, scan_multiple_folders,
+    upgrade_ims_file, BatchConfig, BatchExtractConfig, ProgressPayload, UpEntry,
+};
 
 /// IMS 解析缓存：避免对同一文件反复调用 parse_ims（读取索引区）。
 /// 键为文件路径，值为最近一次解析结果。
@@ -32,7 +39,9 @@ pub struct FolderScanState {
 
 impl FolderScanState {
     fn new() -> Self {
-        Self { cache: Mutex::new(HashMap::new()) }
+        Self {
+            cache: Mutex::new(HashMap::new()),
+        }
     }
 }
 
@@ -69,24 +78,28 @@ fn do_scan_dir(dir_path: &str) -> Vec<FolderEntry> {
     if let Ok(read_dir) = std::fs::read_dir(dir_path) {
         for entry in read_dir.flatten() {
             let path = entry.path();
-            if path.is_dir() { continue; }
+            if path.is_dir() {
+                continue;
+            }
             let filename = match path.file_name().and_then(|n| n.to_str()) {
                 Some(n) => n.to_string(),
                 None => continue,
             };
-            if filename.starts_with('.') { continue; }
-            let ext = path.extension()
+            if filename.starts_with('.') {
+                continue;
+            }
+            let ext = path
+                .extension()
                 .and_then(|e| e.to_str())
                 .map(|e| e.to_lowercase())
                 .unwrap_or_default();
-            let stem = path.file_stem()
-                .and_then(|s| s.to_str())
-                .map(|s| s.to_lowercase())
-                .unwrap_or_default();
-            let is_ims = stem.contains(".ims");
-            if !matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "webp" | "avif") { continue; }
+            let path_str = path.to_string_lossy().to_string();
+            let is_ims = is_ims_file(&path_str);
+            if !is_ims && !matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "webp" | "avif") {
+                continue;
+            }
             entries.push(FolderEntry {
-                filepath: path.to_str().unwrap_or(&filename).to_string(),
+                filepath: path_str,
                 filename,
                 is_ims,
                 file_size: 0,
@@ -100,19 +113,34 @@ fn do_scan_dir(dir_path: &str) -> Vec<FolderEntry> {
 fn natord_compare(a: &str, b: &str) -> std::cmp::Ordering {
     let a_chars: Vec<char> = a.to_lowercase().chars().collect();
     let b_chars: Vec<char> = b.to_lowercase().chars().collect();
-    let mut i = 0; let mut j = 0;
+    let mut i = 0;
+    let mut j = 0;
     while i < a_chars.len() && j < b_chars.len() {
         if a_chars[i].is_ascii_digit() && b_chars[j].is_ascii_digit() {
-            let mut an = String::new(); let mut bn = String::new();
-            while i < a_chars.len() && a_chars[i].is_ascii_digit() { an.push(a_chars[i]); i += 1; }
-            while j < b_chars.len() && b_chars[j].is_ascii_digit() { bn.push(b_chars[j]); j += 1; }
-            match an.parse::<u64>().unwrap_or(0).cmp(&bn.parse::<u64>().unwrap_or(0)) {
+            let mut an = String::new();
+            let mut bn = String::new();
+            while i < a_chars.len() && a_chars[i].is_ascii_digit() {
+                an.push(a_chars[i]);
+                i += 1;
+            }
+            while j < b_chars.len() && b_chars[j].is_ascii_digit() {
+                bn.push(b_chars[j]);
+                j += 1;
+            }
+            match an
+                .parse::<u64>()
+                .unwrap_or(0)
+                .cmp(&bn.parse::<u64>().unwrap_or(0))
+            {
                 std::cmp::Ordering::Equal => continue,
                 o => return o,
             }
         } else {
             match a_chars[i].cmp(&b_chars[j]) {
-                std::cmp::Ordering::Equal => { i += 1; j += 1; }
+                std::cmp::Ordering::Equal => {
+                    i += 1;
+                    j += 1;
+                }
                 o => return o,
             }
         }
@@ -121,10 +149,7 @@ fn natord_compare(a: &str, b: &str) -> std::cmp::Ordering {
 }
 
 /// 获取文件夹列表。缓存命中直接返回，首次扫描并缓存。
-fn get_or_scan_folder(
-    parent_dir: &str,
-    state: &FolderScanState,
-) -> Vec<FolderEntry> {
+fn get_or_scan_folder(parent_dir: &str, state: &FolderScanState) -> Vec<FolderEntry> {
     {
         let cache = state.cache.lock().unwrap();
         if let Some((_mtime, list)) = cache.get(parent_dir) {
@@ -136,7 +161,11 @@ fn get_or_scan_folder(
         .and_then(|m| m.modified())
         .ok();
     let _ = mtime.map(|mt| {
-        state.cache.lock().unwrap().insert(parent_dir.to_string(), (mt, list.clone()))
+        state
+            .cache
+            .lock()
+            .unwrap()
+            .insert(parent_dir.to_string(), (mt, list.clone()))
     });
     list
 }
@@ -144,10 +173,11 @@ fn get_or_scan_folder(
 /// 检查目录是否变更，如有变更则重新扫描并更新缓存。
 /// 前端在切换文件前调用，确保导航列表始终反映最新的目录内容。
 #[tauri::command]
-fn refresh_folder(dir: String, state: tauri::State<'_, FolderScanState>) -> Result<Vec<FolderEntry>, String> {
-    let current_mtime = std::fs::metadata(&dir)
-        .and_then(|m| m.modified())
-        .ok();
+fn refresh_folder(
+    dir: String,
+    state: tauri::State<'_, FolderScanState>,
+) -> Result<Vec<FolderEntry>, String> {
+    let current_mtime = std::fs::metadata(&dir).and_then(|m| m.modified()).ok();
 
     // 检查 mtime 是否变更
     if let Some(mtime) = current_mtime {
@@ -162,7 +192,11 @@ fn refresh_folder(dir: String, state: tauri::State<'_, FolderScanState>) -> Resu
     // 有变更或首次 → 重新扫描
     let list = do_scan_dir(&dir);
     if let Some(mtime) = std::fs::metadata(&dir).and_then(|m| m.modified()).ok() {
-        state.cache.lock().unwrap().insert(dir, (mtime, list.clone()));
+        state
+            .cache
+            .lock()
+            .unwrap()
+            .insert(dir, (mtime, list.clone()));
     }
     Ok(list)
 }
@@ -172,7 +206,11 @@ fn refresh_folder(dir: String, state: tauri::State<'_, FolderScanState>) -> Resu
 // ============================================================
 
 #[tauri::command]
-fn open_file(path: String, cache: tauri::State<'_, ImsCache>, scan_state: tauri::State<'_, FolderScanState>) -> Result<FilePayload, String> {
+fn open_file(
+    path: String,
+    cache: tauri::State<'_, ImsCache>,
+    scan_state: tauri::State<'_, FolderScanState>,
+) -> Result<FilePayload, String> {
     let filepath = Path::new(&path);
 
     if !filepath.exists() {
@@ -199,7 +237,10 @@ fn open_file(path: String, cache: tauri::State<'_, ImsCache>, scan_state: tauri:
         .unwrap_or(".")
         .to_string();
     let folder_list = get_or_scan_folder(&parent_dir, &scan_state);
-    let file_index = folder_list.iter().position(|e| e.filepath == path).unwrap_or(0);
+    let file_index = folder_list
+        .iter()
+        .position(|e| e.filepath == path)
+        .unwrap_or(0);
 
     if is_ims {
         // ---- IMS 文件：一次打开完成解析 + 封面读取 ----
@@ -247,11 +288,14 @@ fn open_file(path: String, cache: tauri::State<'_, ImsCache>, scan_state: tauri:
         })
     } else {
         // ---- 普通图片文件 ----
-        let raw_bytes = std::fs::read(&path)
-            .map_err(|e| format!("读取文件失败: {}", e))?;
+        let raw_bytes = std::fs::read(&path).map_err(|e| format!("读取文件失败: {}", e))?;
 
         // 推断格式
-        let format: u8 = if path.to_lowercase().ends_with(".png") { 1 } else { 0 };
+        let format: u8 = if path.to_lowercase().ends_with(".png") {
+            1
+        } else {
+            0
+        };
         let bytes_base64 = base64::engine::general_purpose::STANDARD.encode(&raw_bytes);
 
         let sub_images = vec![SubImagePayload {
@@ -285,7 +329,11 @@ fn open_file(path: String, cache: tauri::State<'_, ImsCache>, scan_state: tauri:
 /// - 多张图片 → 构建完整 IMS v2（含 SHA-256 哈希）
 /// - WebP/AVIF 自动转 PNG
 #[tauri::command]
-fn save_ims(path: String, images: Vec<SaveImagePayload>, cache: tauri::State<'_, ImsCache>) -> Result<(), String> {
+fn save_ims(
+    path: String,
+    images: Vec<SaveImagePayload>,
+    cache: tauri::State<'_, ImsCache>,
+) -> Result<(), String> {
     if images.is_empty() {
         return Err("图片列表为空".into());
     }
@@ -300,11 +348,19 @@ fn save_ims(path: String, images: Vec<SaveImagePayload>, cache: tauri::State<'_,
 
         // WebP/AVIF → 自动转 PNG
         let (final_bytes, final_format, final_filename) = if img.format == 2 || img.format == 3 {
-            let decoded = image::load_from_memory(&raw_bytes)
-                .map_err(|e| format!("解码图片失败: {} (格式: {})", e, if img.format == 2 { "WebP" } else { "AVIF" }))?;
+            let decoded = image::load_from_memory(&raw_bytes).map_err(|e| {
+                format!(
+                    "解码图片失败: {} (格式: {})",
+                    e,
+                    if img.format == 2 { "WebP" } else { "AVIF" }
+                )
+            })?;
             let mut png_bytes = Vec::new();
             decoded
-                .write_to(&mut std::io::Cursor::new(&mut png_bytes), image::ImageFormat::Png)
+                .write_to(
+                    &mut std::io::Cursor::new(&mut png_bytes),
+                    image::ImageFormat::Png,
+                )
                 .map_err(|e| format!("PNG 编码失败: {}", e))?;
             let new_name = format!(
                 "{}.png",
@@ -349,8 +405,8 @@ async fn pick_file(app: tauri::AppHandle) -> Result<Option<String>, String> {
     let result = app
         .dialog()
         .file()
-        .add_filter("图片文件", &["jpg", "jpeg", "png", "ims.jpg", "ims.png"])
-        .add_filter("IMS 文件", &["ims.jpg", "ims.png"])
+        .add_filter("图片文件", &["jpg", "jpeg", "png", "ims", "ims.jpg", "ims.png"])
+        .add_filter("IMS 文件", &["ims", "ims.jpg", "ims.png"])
         .add_filter("普通图片", &["jpg", "jpeg", "png"])
         .add_filter("所有文件", &["*"])
         .blocking_pick_file();
@@ -360,7 +416,10 @@ async fn pick_file(app: tauri::AppHandle) -> Result<Option<String>, String> {
 
 /// 弹出另存为对话框
 #[tauri::command]
-async fn pick_save_path(app: tauri::AppHandle, default_name: String) -> Result<Option<String>, String> {
+async fn pick_save_path(
+    app: tauri::AppHandle,
+    default_name: String,
+) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
 
     let result = app
@@ -379,10 +438,7 @@ async fn pick_save_path(app: tauri::AppHandle, default_name: String) -> Result<O
 async fn pick_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
 
-    let result = app
-        .dialog()
-        .file()
-        .blocking_pick_folder();
+    let result = app.dialog().file().blocking_pick_folder();
 
     Ok(result.map(|p| p.to_string()))
 }
@@ -390,7 +446,11 @@ async fn pick_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
 /// 按需获取 IMS 文件中指定索引的子图数据（base64）
 /// 使用缓存避免对同一文件反复解析 IMS 索引。
 #[tauri::command]
-fn get_sub_image(path: String, index: usize, cache: tauri::State<'_, ImsCache>) -> Result<SubImagePayload, String> {
+fn get_sub_image(
+    path: String,
+    index: usize,
+    cache: tauri::State<'_, ImsCache>,
+) -> Result<SubImagePayload, String> {
     if !is_ims_file(&path) {
         return Err("非 IMS 文件，无法获取子图".into());
     }
@@ -419,7 +479,12 @@ fn get_sub_image(path: String, index: usize, cache: tauri::State<'_, ImsCache>) 
 
 /// 导出单张图片——弹出保存对话框
 #[tauri::command]
-async fn extract_image(app: tauri::AppHandle, path: String, index: usize, cache: tauri::State<'_, ImsCache>) -> Result<String, String> {
+async fn extract_image(
+    app: tauri::AppHandle,
+    path: String,
+    index: usize,
+    cache: tauri::State<'_, ImsCache>,
+) -> Result<String, String> {
     use tauri_plugin_dialog::DialogExt;
 
     let (bytes, default_name) = if is_ims_file(&path) {
@@ -431,7 +496,7 @@ async fn extract_image(app: tauri::AppHandle, path: String, index: usize, cache:
         let data = read_sub_image(&path, img.data_offset, img.data_length)?;
 
         // 使用原始文件名，保留扩展名
-        let ext = if img.format == 1 { "png" } else { "jpg" };
+        let ext = image_extension(img.format);
         let stem = Path::new(&img.filename)
             .file_stem()
             .and_then(|s| s.to_str())
@@ -457,8 +522,7 @@ async fn extract_image(app: tauri::AppHandle, path: String, index: usize, cache:
 
     if let Some(save_path) = save_path {
         let path_str = save_path.to_string();
-        std::fs::write(Path::new(&path_str), &bytes)
-            .map_err(|e| format!("写入文件失败: {}", e))?;
+        std::fs::write(Path::new(&path_str), &bytes).map_err(|e| format!("写入文件失败: {}", e))?;
         Ok(path_str)
     } else {
         Err("用户取消了保存".into())
@@ -467,7 +531,11 @@ async fn extract_image(app: tauri::AppHandle, path: String, index: usize, cache:
 
 /// 导出 IMS 文件中的全部子图到指定目录
 #[tauri::command]
-async fn extract_all(app: tauri::AppHandle, path: String, cache: tauri::State<'_, ImsCache>) -> Result<Vec<String>, String> {
+async fn extract_all(
+    app: tauri::AppHandle,
+    path: String,
+    cache: tauri::State<'_, ImsCache>,
+) -> Result<Vec<String>, String> {
     use tauri_plugin_dialog::DialogExt;
 
     if !is_ims_file(&path) {
@@ -475,10 +543,7 @@ async fn extract_all(app: tauri::AppHandle, path: String, cache: tauri::State<'_
     }
 
     // 选择输出目录
-    let dir = app
-        .dialog()
-        .file()
-        .blocking_pick_folder();
+    let dir = app.dialog().file().blocking_pick_folder();
 
     if dir.is_none() {
         return Err("用户取消了选择".into());
@@ -490,34 +555,224 @@ async fn extract_all(app: tauri::AppHandle, path: String, cache: tauri::State<'_
 
     for img in &ims_info.images {
         let bytes = read_sub_image(&path, img.data_offset, img.data_length)?;
-        let ext = if img.format == 1 { "png" } else { "jpg" };
-        let out_path = Path::new(&out_dir).join(format!("{}.{}",
-            Path::new(&img.filename)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or(&img.filename),
-            ext
-        ));
-        std::fs::write(&out_path, &bytes)
-            .map_err(|e| format!("写入失败 {}: {}", out_path.display(), e))?;
+        let out_name = output_image_filename(&img.filename, img.format, img.index);
+        let out_path = write_export_image(&Path::new(&out_dir).join(out_name), &bytes)?;
         saved_paths.push(out_path.to_string_lossy().to_string());
     }
 
     Ok(saved_paths)
 }
 
+fn image_extension(format: u8) -> &'static str {
+    match format {
+        1 => "png",
+        2 => "webp",
+        3 => "avif",
+        _ => "jpg",
+    }
+}
+
+fn sanitize_path_component(raw: &str, fallback: &str) -> String {
+    let mut name = raw
+        .chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect::<String>()
+        .trim()
+        .trim_end_matches('.')
+        .to_string();
+
+    if name.is_empty() {
+        name = fallback.to_string();
+    }
+
+    let upper = name.to_ascii_uppercase();
+    let reserved = [
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    if reserved.contains(&upper.as_str()) {
+        name.push('_');
+    }
+
+    name
+}
+
+fn ims_output_folder_name(filepath: &str) -> String {
+    let file_name = Path::new(filepath)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("ims");
+    let lower = file_name.to_lowercase();
+    for suffix in [
+        ".ims.jpg",
+        ".ims.jpeg",
+        ".ims.png",
+        ".ims.webp",
+        ".ims.avif",
+        ".ims",
+    ] {
+        if lower.ends_with(suffix) && file_name.len() > suffix.len() {
+            return sanitize_path_component(&file_name[..file_name.len() - suffix.len()], "ims");
+        }
+    }
+
+    let stem = Path::new(file_name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("ims");
+    let stem_lower = stem.to_lowercase();
+    let trimmed = if stem_lower.ends_with(".ims") && stem.len() > 4 {
+        &stem[..stem.len() - 4]
+    } else {
+        stem
+    };
+    sanitize_path_component(trimmed, "ims")
+}
+
+fn output_image_filename(filename: &str, format: u8, index: usize) -> String {
+    let fallback = format!("image_{:05}", index + 1);
+    let file_name = Path::new(filename)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(filename);
+    let stem = Path::new(file_name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&fallback);
+    let safe_stem = sanitize_path_component(stem, &fallback);
+    format!("{}.{}", safe_stem, image_extension(format))
+}
+
+fn unique_dir_path(base: &Path, used: &mut HashSet<String>) -> PathBuf {
+    let parent = base.parent().unwrap_or_else(|| Path::new(""));
+    let name = base.file_name().and_then(|s| s.to_str()).unwrap_or("ims");
+
+    for n in 0.. {
+        let candidate = if n == 0 {
+            base.to_path_buf()
+        } else {
+            parent.join(format!("{}_{}", name, n))
+        };
+        let key = candidate.to_string_lossy().to_lowercase();
+        if used.insert(key) {
+            return candidate;
+        }
+    }
+
+    base.to_path_buf()
+}
+
+fn md5_hex(bytes: &[u8]) -> String {
+    format!("{:x}", md5::compute(bytes))
+}
+
+fn existing_file_md5(path: &Path) -> Result<Option<String>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    if !path.is_file() {
+        return Err(format!("输出路径已存在且不是文件: {}", path.display()));
+    }
+    let bytes = std::fs::read(path).map_err(|e| format!("读取已有文件失败 {}: {}", path.display(), e))?;
+    Ok(Some(md5_hex(&bytes)))
+}
+
+fn numbered_base_stem(stem: &str) -> &str {
+    let Some(without_tail) = stem.strip_suffix('_') else {
+        return stem;
+    };
+    let Some(pos) = without_tail.rfind('_') else {
+        return stem;
+    };
+    let number = &without_tail[pos + 1..];
+    if number.len() == 5 && number.chars().all(|c| c.is_ascii_digit()) {
+        &without_tail[..pos]
+    } else {
+        stem
+    }
+}
+
+fn numbered_export_path(base: &Path, number: u32) -> PathBuf {
+    let parent = base.parent().unwrap_or_else(|| Path::new(""));
+    let stem = base.file_stem().and_then(|s| s.to_str()).unwrap_or("image");
+    let ext = base.extension().and_then(|s| s.to_str()).unwrap_or("");
+    let base_stem = numbered_base_stem(stem);
+    let filename = if ext.is_empty() {
+        format!("{}_{:05}_", base_stem, number)
+    } else {
+        format!("{}_{:05}_.{}", base_stem, number, ext)
+    };
+    parent.join(filename)
+}
+
+fn resolve_export_file_path(base: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
+    let current_md5 = md5_hex(bytes);
+    match existing_file_md5(base)? {
+        None => return Ok(base.to_path_buf()),
+        Some(existing_md5) if existing_md5 == current_md5 => return Ok(base.to_path_buf()),
+        Some(_) => {}
+    }
+
+    for number in 1..=99_999 {
+        let candidate = numbered_export_path(base, number);
+        match existing_file_md5(&candidate)? {
+            None => return Ok(candidate),
+            Some(existing_md5) if existing_md5 == current_md5 => return Ok(candidate),
+            Some(_) => continue,
+        }
+    }
+
+    Err(format!(
+        "没有可用编号: {} 已占用 _00001_ 到 _99999_",
+        base.display()
+    ))
+}
+
+fn write_export_image(base_path: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
+    let out_path = resolve_export_file_path(base_path, bytes)?;
+    if out_path.exists() {
+        return Ok(out_path);
+    }
+    if let Some(parent) = out_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建输出目录失败 {}: {}", parent.display(), e))?;
+    }
+    std::fs::write(&out_path, bytes).map_err(|e| format!("写入失败 {}: {}", out_path.display(), e))?;
+    Ok(out_path)
+}
+
+fn extract_ims_file_to_dir(filepath: &str, out_dir: &Path) -> Result<usize, String> {
+    let ims_info = parse_ims(filepath)?;
+    std::fs::create_dir_all(out_dir)
+        .map_err(|e| format!("创建输出目录失败 {}: {}", out_dir.display(), e))?;
+
+    let mut saved = 0usize;
+    for img in &ims_info.images {
+        let bytes = read_sub_image(filepath, img.data_offset, img.data_length)?;
+        let out_name = output_image_filename(&img.filename, img.format, img.index);
+        write_export_image(&out_dir.join(out_name), &bytes)?;
+        saved += 1;
+    }
+
+    Ok(saved)
+}
+
 /// 注册 imsViewer 到右键菜单"使用 imsViewer 打开"
 #[tauri::command]
 fn register_file_associations() -> Result<String, String> {
-    let exe_path = std::env::current_exe()
-        .map_err(|e| format!("获取 exe 路径失败: {}", e))?;
+    let exe_path = std::env::current_exe().map_err(|e| format!("获取 exe 路径失败: {}", e))?;
     let exe_str = exe_path.to_string_lossy().to_string();
     let exe_cmd = format!("\"{}\" \"%1\"", exe_str);
     let ico = format!("\"{}\",0", exe_str);
 
     let ext_groups: &[(&str, &[&str])] = &[
         ("image", &["jpg", "jpeg", "png", "webp", "avif"]),
-        ("imscontainer", &["ims.jpg", "ims.png"]),
+        ("imscontainer", &["ims", "ims.jpg", "ims.png"]),
     ];
 
     for (_group, exts) in ext_groups {
@@ -544,9 +799,206 @@ fn register_file_associations() -> Result<String, String> {
     }
 
     // 刷新 shell
-    let _ = std::process::Command::new("ie4uinit").args(["-show"]).output();
+    let _ = std::process::Command::new("ie4uinit")
+        .args(["-show"])
+        .output();
 
     Ok("已添加到右键菜单".into())
+}
+
+struct BatchExtractTask {
+    input_path: String,
+    output_dir: PathBuf,
+}
+
+/// 批量解压：扫描目录中的 IMS 文件，逐个导出全部子图
+#[tauri::command]
+async fn start_batch_extract(
+    app: tauri::AppHandle,
+    config: BatchExtractConfig,
+) -> Result<String, String> {
+    let input_dir = std::fs::canonicalize(config.input_dir.trim())
+        .map_err(|e| format!("输入目录无效: {}", e))?;
+    if !input_dir.is_dir() {
+        return Err(format!("输入目录不存在: {}", input_dir.display()));
+    }
+
+    if config.output_dir.trim().is_empty() {
+        return Err("请选择输出目录".into());
+    }
+    let output_root = PathBuf::from(config.output_dir.trim());
+    let depth = config.depth.min(100);
+    let files = scan_ims_files(&input_dir.to_string_lossy(), depth);
+    let total = files.len() as u32;
+
+    if total == 0 {
+        return Err("未发现 IMS 文件".into());
+    }
+
+    let input_base = input_dir.parent().unwrap_or(input_dir.as_path());
+    let mut used_dirs = HashSet::new();
+    let mut tasks = Vec::with_capacity(files.len());
+    for fp in files {
+        let source_parent = Path::new(&fp).parent().unwrap_or(input_dir.as_path());
+        let target_parent = if config.preserve_structure {
+            let rel = source_parent
+                .strip_prefix(input_base)
+                .or_else(|_| source_parent.strip_prefix(&input_dir))
+                .unwrap_or_else(|_| Path::new(""));
+            output_root.join(rel)
+        } else {
+            output_root.clone()
+        };
+        let out_base = target_parent.join(ims_output_folder_name(&fp));
+        let output_dir = unique_dir_path(&out_base, &mut used_dirs);
+        tasks.push(BatchExtractTask {
+            input_path: fp,
+            output_dir,
+        });
+    }
+
+    let total_msg = format!("共发现 {} 个 IMS 文件", total);
+    let _ = app.emit(
+        "batch-progress",
+        ProgressPayload {
+            current: 0,
+            total,
+            message: total_msg.clone(),
+            status: "running".into(),
+        },
+    );
+
+    let app_handle = app.clone();
+    let multi = config.multi_threaded;
+
+    std::thread::spawn(move || {
+        let result: Result<String, String> = if multi {
+            use rayon::prelude::*;
+            use std::sync::atomic::{AtomicU32, Ordering};
+
+            let completed = AtomicU32::new(0);
+            let failed = AtomicU32::new(0);
+
+            tasks.par_iter().for_each(|task| {
+                let fname = Path::new(&task.input_path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(&task.input_path);
+                match extract_ims_file_to_dir(&task.input_path, &task.output_dir) {
+                    Ok(count) => {
+                        let current = completed.fetch_add(1, Ordering::SeqCst) + 1;
+                        let _ = app_handle.emit(
+                            "batch-progress",
+                            ProgressPayload {
+                                current,
+                                total,
+                                message: format!("已解压 {} ({} 张)", fname, count),
+                                status: "running".into(),
+                            },
+                        );
+                    }
+                    Err(e) => {
+                        failed.fetch_add(1, Ordering::SeqCst);
+                        let current = completed.fetch_add(1, Ordering::SeqCst) + 1;
+                        let _ = app_handle.emit(
+                            "batch-progress",
+                            ProgressPayload {
+                                current,
+                                total,
+                                message: format!("失败 {}: {}", fname, e),
+                                status: "running".into(),
+                            },
+                        );
+                    }
+                }
+            });
+
+            let failures = failed.load(Ordering::SeqCst);
+            if failures == 0 {
+                Ok(format!("全部完成，共 {} 个 IMS 文件", total))
+            } else {
+                Err(format!(
+                    "解压完成，成功 {} 个，失败 {} 个",
+                    total - failures,
+                    failures
+                ))
+            }
+        } else {
+            let mut completed = 0u32;
+            let mut failed = 0u32;
+
+            for task in &tasks {
+                let fname = Path::new(&task.input_path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(&task.input_path);
+                match extract_ims_file_to_dir(&task.input_path, &task.output_dir) {
+                    Ok(count) => {
+                        completed += 1;
+                        let _ = app_handle.emit(
+                            "batch-progress",
+                            ProgressPayload {
+                                current: completed,
+                                total,
+                                message: format!("已解压 {} ({} 张)", fname, count),
+                                status: "running".into(),
+                            },
+                        );
+                    }
+                    Err(e) => {
+                        completed += 1;
+                        failed += 1;
+                        let _ = app_handle.emit(
+                            "batch-progress",
+                            ProgressPayload {
+                                current: completed,
+                                total,
+                                message: format!("失败 {}: {}", fname, e),
+                                status: "running".into(),
+                            },
+                        );
+                    }
+                }
+            }
+
+            if failed == 0 {
+                Ok(format!("全部完成，共 {} 个 IMS 文件", total))
+            } else {
+                Err(format!(
+                    "解压完成，成功 {} 个，失败 {} 个",
+                    total - failed,
+                    failed
+                ))
+            }
+        };
+
+        match result {
+            Ok(message) => {
+                let _ = app_handle.emit(
+                    "batch-progress",
+                    ProgressPayload {
+                        current: total,
+                        total,
+                        message,
+                        status: "completed".into(),
+                    },
+                );
+            }
+            Err(message) => {
+                let _ = app_handle.emit(
+                    "batch-progress",
+                    ProgressPayload {
+                        current: total,
+                        total,
+                        message,
+                        status: "error".into(),
+                    },
+                );
+            }
+        }
+    });
+
+    Ok(total_msg)
 }
 
 /// 批量升级：扫描 IMS 文件，升级到最新版本（v2 + SHA-256 hash）
@@ -565,43 +1017,55 @@ async fn start_batch_upgrade(
     }
 
     let total_msg = format!("共发现 {} 个 IMS 文件", total);
-    let _ = app.emit("batch-progress", ProgressPayload {
-        current: 0,
-        total,
-        message: total_msg.clone(),
-        status: "running".into(),
-    });
+    let _ = app.emit(
+        "batch-progress",
+        ProgressPayload {
+            current: 0,
+            total,
+            message: total_msg.clone(),
+            status: "running".into(),
+        },
+    );
 
     let app_handle = app.clone();
 
     std::thread::spawn(move || {
         let result = if multi_threaded {
             use rayon::prelude::*;
-            use std::sync::atomic::{AtomicU32, AtomicBool, Ordering};
+            use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
             let completed = AtomicU32::new(0);
             let has_error = AtomicBool::new(false);
 
             files.par_iter().for_each(|fp| {
-                let fname = Path::new(fp).file_name().and_then(|n| n.to_str()).unwrap_or(fp);
+                let fname = Path::new(fp)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(fp);
                 match upgrade_ims_file(fp) {
                     Ok(()) => {
                         let current = completed.fetch_add(1, Ordering::SeqCst) + 1;
-                        let _ = app_handle.emit("batch-progress", ProgressPayload {
-                            current,
-                            total,
-                            message: format!("已升级 {}", fname),
-                            status: "running".into(),
-                        });
+                        let _ = app_handle.emit(
+                            "batch-progress",
+                            ProgressPayload {
+                                current,
+                                total,
+                                message: format!("已升级 {}", fname),
+                                status: "running".into(),
+                            },
+                        );
                     }
                     Err(e) => {
                         has_error.store(true, Ordering::SeqCst);
-                        let _ = app_handle.emit("batch-progress", ProgressPayload {
-                            current: completed.load(Ordering::SeqCst),
-                            total,
-                            message: format!("失败 {}: {}", fname, e),
-                            status: "running".into(),
-                        });
+                        let _ = app_handle.emit(
+                            "batch-progress",
+                            ProgressPayload {
+                                current: completed.load(Ordering::SeqCst),
+                                total,
+                                message: format!("失败 {}: {}", fname, e),
+                                status: "running".into(),
+                            },
+                        );
                     }
                 }
             });
@@ -614,24 +1078,33 @@ async fn start_batch_upgrade(
         } else {
             let mut completed: u32 = 0;
             for fp in &files {
-                let fname = Path::new(fp).file_name().and_then(|n| n.to_str()).unwrap_or(fp);
+                let fname = Path::new(fp)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(fp);
                 match upgrade_ims_file(fp) {
                     Ok(()) => {
                         completed += 1;
-                        let _ = app_handle.emit("batch-progress", ProgressPayload {
-                            current: completed,
-                            total,
-                            message: format!("已升级 {}", fname),
-                            status: "running".into(),
-                        });
+                        let _ = app_handle.emit(
+                            "batch-progress",
+                            ProgressPayload {
+                                current: completed,
+                                total,
+                                message: format!("已升级 {}", fname),
+                                status: "running".into(),
+                            },
+                        );
                     }
                     Err(e) => {
-                        let _ = app_handle.emit("batch-progress", ProgressPayload {
-                            current: completed,
-                            total,
-                            message: format!("失败 {}: {}", fname, e),
-                            status: "running".into(),
-                        });
+                        let _ = app_handle.emit(
+                            "batch-progress",
+                            ProgressPayload {
+                                current: completed,
+                                total,
+                                message: format!("失败 {}: {}", fname, e),
+                                status: "running".into(),
+                            },
+                        );
                     }
                 }
             }
@@ -640,20 +1113,26 @@ async fn start_batch_upgrade(
 
         match result {
             Ok(()) => {
-                let _ = app_handle.emit("batch-progress", ProgressPayload {
-                    current: total,
-                    total,
-                    message: format!("全部完成，共 {} 个文件", total),
-                    status: "completed".into(),
-                });
+                let _ = app_handle.emit(
+                    "batch-progress",
+                    ProgressPayload {
+                        current: total,
+                        total,
+                        message: format!("全部完成，共 {} 个文件", total),
+                        status: "completed".into(),
+                    },
+                );
             }
             Err(e) => {
-                let _ = app_handle.emit("batch-progress", ProgressPayload {
-                    current: total,
-                    total,
-                    message: e,
-                    status: "error".into(),
-                });
+                let _ = app_handle.emit(
+                    "batch-progress",
+                    ProgressPayload {
+                        current: total,
+                        total,
+                        message: e,
+                        status: "error".into(),
+                    },
+                );
             }
         }
     });
@@ -663,10 +1142,7 @@ async fn start_batch_upgrade(
 
 /// 批量转换：扫描文件夹，按命名规范分组并打包为 IMS 文件
 #[tauri::command]
-async fn start_batch_convert(
-    app: tauri::AppHandle,
-    config: BatchConfig,
-) -> Result<String, String> {
+async fn start_batch_convert(app: tauri::AppHandle, config: BatchConfig) -> Result<String, String> {
     // 1. 扫描所有文件夹，分组
     let groups = scan_multiple_folders(&config.folders)?;
     let total = groups.len() as u32;
@@ -676,12 +1152,15 @@ async fn start_batch_convert(
     }
 
     let total_msg = format!("共发现 {} 组可转换", total);
-    let _ = app.emit("batch-progress", ProgressPayload {
-        current: 0,
-        total,
-        message: total_msg.clone(),
-        status: "running".into(),
-    });
+    let _ = app.emit(
+        "batch-progress",
+        ProgressPayload {
+            current: 0,
+            total,
+            message: total_msg.clone(),
+            status: "running".into(),
+        },
+    );
 
     // 2. 构建任务列表
     let output_dir = config.output_dir.clone();
@@ -692,24 +1171,27 @@ async fn start_batch_convert(
         message: String,
     }
 
-    let tasks: Vec<Task> = groups.iter().map(|g| {
-        let output_filename = format!("{}.ims.{}", g.base_name, g.cover_ext);
-        let output_path = compute_output_path(g, &output_dir, config.preserve_structure);
+    let tasks: Vec<Task> = groups
+        .iter()
+        .map(|g| {
+            let output_filename = format!("{}.ims.{}", g.base_name, g.cover_ext);
+            let output_path = compute_output_path(g, &output_dir, config.preserve_structure);
 
-        let mut image_paths = vec![g.cover.to_string_lossy().to_string()];
-        let mut source_files = vec![g.cover.to_string_lossy().to_string()];
-        for (_, sub_path) in &g.sub_images {
-            image_paths.push(sub_path.to_string_lossy().to_string());
-            source_files.push(sub_path.to_string_lossy().to_string());
-        }
+            let mut image_paths = vec![g.cover.to_string_lossy().to_string()];
+            let mut source_files = vec![g.cover.to_string_lossy().to_string()];
+            for (_, sub_path) in &g.sub_images {
+                image_paths.push(sub_path.to_string_lossy().to_string());
+                source_files.push(sub_path.to_string_lossy().to_string());
+            }
 
-        Task {
-            image_paths,
-            output_path,
-            source_files,
-            message: format!("已转换 {}", output_filename),
-        }
-    }).collect();
+            Task {
+                image_paths,
+                output_path,
+                source_files,
+                message: format!("已转换 {}", output_filename),
+            }
+        })
+        .collect();
 
     // 3. 执行转换
     let delete_source = config.delete_source;
@@ -729,31 +1211,35 @@ async fn start_batch_convert(
 
         let result = if multi {
             use rayon::prelude::*;
-            use std::sync::atomic::{AtomicU32, AtomicBool, Ordering};
+            use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
             let completed = AtomicU32::new(0);
             let has_error = AtomicBool::new(false);
 
-            tasks.par_iter().for_each(|task| {
-                match convert(task) {
-                    Ok(()) => {
-                        let current = completed.fetch_add(1, Ordering::SeqCst) + 1;
-                        let _ = app_handle.emit("batch-progress", ProgressPayload {
+            tasks.par_iter().for_each(|task| match convert(task) {
+                Ok(()) => {
+                    let current = completed.fetch_add(1, Ordering::SeqCst) + 1;
+                    let _ = app_handle.emit(
+                        "batch-progress",
+                        ProgressPayload {
                             current,
                             total,
                             message: task.message.clone(),
                             status: "running".into(),
-                        });
-                    }
-                    Err(e) => {
-                        has_error.store(true, Ordering::SeqCst);
-                        let _ = app_handle.emit("batch-progress", ProgressPayload {
+                        },
+                    );
+                }
+                Err(e) => {
+                    has_error.store(true, Ordering::SeqCst);
+                    let _ = app_handle.emit(
+                        "batch-progress",
+                        ProgressPayload {
                             current: completed.load(Ordering::SeqCst),
                             total,
                             message: format!("失败: {}", e),
                             status: "running".into(),
-                        });
-                    }
+                        },
+                    );
                 }
             });
 
@@ -768,20 +1254,26 @@ async fn start_batch_convert(
                 match convert(task) {
                     Ok(()) => {
                         completed += 1;
-                        let _ = app_handle.emit("batch-progress", ProgressPayload {
-                            current: completed,
-                            total,
-                            message: task.message.clone(),
-                            status: "running".into(),
-                        });
+                        let _ = app_handle.emit(
+                            "batch-progress",
+                            ProgressPayload {
+                                current: completed,
+                                total,
+                                message: task.message.clone(),
+                                status: "running".into(),
+                            },
+                        );
                     }
                     Err(e) => {
-                        let _ = app_handle.emit("batch-progress", ProgressPayload {
-                            current: completed,
-                            total,
-                            message: format!("失败: {}", e),
-                            status: "running".into(),
-                        });
+                        let _ = app_handle.emit(
+                            "batch-progress",
+                            ProgressPayload {
+                                current: completed,
+                                total,
+                                message: format!("失败: {}", e),
+                                status: "running".into(),
+                            },
+                        );
                     }
                 }
             }
@@ -790,20 +1282,26 @@ async fn start_batch_convert(
 
         match result {
             Ok(()) => {
-                let _ = app_handle.emit("batch-progress", ProgressPayload {
-                    current: total,
-                    total,
-                    message: format!("全部完成，共 {} 组", total),
-                    status: "completed".into(),
-                });
+                let _ = app_handle.emit(
+                    "batch-progress",
+                    ProgressPayload {
+                        current: total,
+                        total,
+                        message: format!("全部完成，共 {} 组", total),
+                        status: "completed".into(),
+                    },
+                );
             }
             Err(e) => {
-                let _ = app_handle.emit("batch-progress", ProgressPayload {
-                    current: total,
-                    total,
-                    message: e,
-                    status: "error".into(),
-                });
+                let _ = app_handle.emit(
+                    "batch-progress",
+                    ProgressPayload {
+                        current: total,
+                        total,
+                        message: e,
+                        status: "error".into(),
+                    },
+                );
             }
         }
     });
@@ -839,6 +1337,7 @@ pub fn run(launch_file: Option<String>) {
             get_sub_image,
             extract_image,
             extract_all,
+            start_batch_extract,
             start_batch_convert,
             start_batch_upgrade,
             register_file_associations,

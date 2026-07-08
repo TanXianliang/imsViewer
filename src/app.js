@@ -841,6 +841,9 @@ function setupMenuActions() {
         case 'export-all':
           exportAll();
           break;
+        case 'batch-extract':
+          openExtractModal();
+          break;
         case 'fit':
           fitToWindow();
           drawImage();
@@ -912,6 +915,9 @@ function setupMenuActions() {
             '  文件名含 .ims (如 texture.ims.jpg)\n' +
             '  封面在文件头，子图追加在后\n' +
             '  ↑ ↓ 键切换子图，左侧显示缩略图\n\n' +
+            '批量解压:\n' +
+            '  工具 → 批量解压 IMS\n' +
+            '  选择输入目录和输出目录，可保持目录结构\n\n' +
             '批量转换:\n' +
             '  工具 → 批量转换\n' +
             '  添加文件夹 → 设置深度 → 开始\n' +
@@ -1091,6 +1097,85 @@ function setupBatchEvents() {
 
 function escapeHtml(str) {
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// ===== 批量解压模态框 =====
+let extractUnlisten = null;
+
+function openExtractModal() {
+  const modal = $('#extract-modal');
+  modal.style.display = 'flex';
+  $('#extract-progress-fill').style.width = '0%';
+  $('#extract-progress-text').textContent = '准备就绪';
+  $('#btn-start-extract').disabled = false;
+  $('#btn-start-extract').textContent = '开始解压';
+
+  $('#btn-browse-extract').onclick = async () => {
+    try {
+      const dir = await invoke('pick_folder');
+      if (dir) $('#extract-dir-input').value = dir;
+    } catch (e) { console.error('选择输入目录失败:', e); }
+  };
+  $('#btn-browse-extract-output').onclick = async () => {
+    try {
+      const dir = await invoke('pick_folder');
+      if (dir) $('#extract-output-dir-input').value = dir;
+    } catch (e) { console.error('选择输出目录失败:', e); }
+  };
+  $('#btn-extract-close').onclick = () => closeExtractModal();
+  $('#btn-cancel-extract').onclick = () => closeExtractModal();
+  $('#btn-start-extract').onclick = () => startBatchExtract();
+}
+
+function closeExtractModal() {
+  $('#extract-modal').style.display = 'none';
+  if (extractUnlisten) {
+    extractUnlisten();
+    extractUnlisten = null;
+  }
+}
+
+async function startBatchExtract() {
+  const inputDir = $('#extract-dir-input').value.trim();
+  const outputDir = $('#extract-output-dir-input').value.trim();
+  if (!inputDir) { alert('请选择输入目录'); return; }
+  if (!outputDir) { alert('请选择输出目录'); return; }
+
+  const depth = parseInt($('#extract-depth-input').value) || 0;
+  const config = {
+    input_dir: inputDir,
+    depth: Math.min(100, Math.max(0, depth)),
+    output_dir: outputDir,
+    preserve_structure: $('#chk-extract-preserve-structure').checked,
+    multi_threaded: $('#chk-extract-multi').checked,
+  };
+
+  const btn = $('#btn-start-extract');
+  btn.disabled = true;
+  btn.textContent = '解压中...';
+  $('#extract-progress-text').textContent = '正在扫描 IMS 文件...';
+
+  try {
+    if (extractUnlisten) extractUnlisten();
+    extractUnlisten = await listen('batch-progress', (event) => {
+      const p = event.payload;
+      const pct = p.total > 0 ? Math.round((p.current / p.total) * 100) : 0;
+      $('#extract-progress-fill').style.width = pct + '%';
+      $('#extract-progress-text').textContent = `[${p.current}/${p.total}] ${p.message}`;
+
+      if (p.status === 'completed' || p.status === 'error') {
+        btn.disabled = false;
+        btn.textContent = '开始解压';
+        $('#extract-progress-text').textContent = (p.status === 'completed' ? '✅ ' : '⚠️ ') + p.message;
+      }
+    });
+
+    await invoke('start_batch_extract', { config });
+  } catch (err) {
+    alert('启动解压失败: ' + err);
+    btn.disabled = false;
+    btn.textContent = '开始解压';
+  }
 }
 
 // ===== 批量升级模态框 =====

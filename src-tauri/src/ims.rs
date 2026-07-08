@@ -97,9 +97,9 @@ pub struct SubImagePayload {
 /// 解析 IMS 文件，返回元数据。不提取图片数据。
 /// 只读取文件末尾的索引区（~KB 级），不读取前面的图片数据。
 pub fn parse_ims(filepath: &str) -> Result<ImsFileInfo, String> {
-    let mut file = std::fs::File::open(filepath)
-        .map_err(|e| format!("打开文件失败: {}", e))?;
-    let file_size = file.metadata()
+    let mut file = std::fs::File::open(filepath).map_err(|e| format!("打开文件失败: {}", e))?;
+    let file_size = file
+        .metadata()
         .map_err(|e| format!("读取文件信息失败: {}", e))?
         .len();
 
@@ -212,38 +212,44 @@ pub fn parse_ims(filepath: &str) -> Result<ImsFileInfo, String> {
 /// - 文件 > 16MB → seek + read_exact（避免网络/大文件全量传输）
 pub fn read_sub_image(filepath: &str, offset: u32, length: u32) -> Result<Vec<u8>, String> {
     // 先获取文件大小
-    let file_size = std::fs::metadata(filepath)
-        .map_err(|e| format!("读取文件信息失败: {}", e))?;
+    let file_size = std::fs::metadata(filepath).map_err(|e| format!("读取文件信息失败: {}", e))?;
     let size = file_size.len();
 
     if size <= 16 * 1024 * 1024 {
         // 小文件：整读 + 切片（1 次 syscall，OS 预读友好）
-        let data = std::fs::read(filepath)
-            .map_err(|e| format!("读取文件失败: {}", e))?;
+        let data = std::fs::read(filepath).map_err(|e| format!("读取文件失败: {}", e))?;
         let start = offset as usize;
         let end = (offset + length) as usize;
         if end > data.len() {
-            return Err(format!("数据偏移超出文件范围: {} + {} > {}", offset, length, data.len()));
+            return Err(format!(
+                "数据偏移超出文件范围: {} + {} > {}",
+                offset,
+                length,
+                data.len()
+            ));
         }
         Ok(data[start..end].to_vec())
     } else {
         // 大文件：seek 定位，只读需要的字节
-        let mut file = std::fs::File::open(filepath)
-            .map_err(|e| format!("打开文件失败: {}", e))?;
+        let mut file = std::fs::File::open(filepath).map_err(|e| format!("打开文件失败: {}", e))?;
         file.seek(SeekFrom::Start(offset as u64))
             .map_err(|e| format!("seek 子图数据失败: {}", e))?;
         let mut buf = vec![0u8; length as usize];
-        file.read_exact(&mut buf)
-            .map_err(|e| format!("读取子图数据失败: {} (offset={}, len={})", e, offset, length))?;
+        file.read_exact(&mut buf).map_err(|e| {
+            format!(
+                "读取子图数据失败: {} (offset={}, len={})",
+                e, offset, length
+            )
+        })?;
         Ok(buf)
     }
 }
 
 /// 一次文件打开完成 IMS 解析 + 封面读取，减少 SMB CreateFile 次数
 pub fn parse_ims_and_read_cover(filepath: &str) -> Result<(ImsFileInfo, Vec<u8>), String> {
-    let mut file = std::fs::File::open(filepath)
-        .map_err(|e| format!("打开文件失败: {}", e))?;
-    let file_size = file.metadata()
+    let mut file = std::fs::File::open(filepath).map_err(|e| format!("打开文件失败: {}", e))?;
+    let file_size = file
+        .metadata()
         .map_err(|e| format!("读取文件信息失败: {}", e))?
         .len();
 
@@ -280,8 +286,11 @@ pub fn parse_ims_and_read_cover(filepath: &str) -> Result<(ImsFileInfo, Vec<u8>)
     c.read_exact(&mut magic_buf)
         .map_err(|e| format!("读取 magic 失败: {}", e))?;
     if &magic_buf != MAGIC {
-        return Err(format!("Magic 不匹配: 期望 {}, 实际 {}",
-            String::from_utf8_lossy(MAGIC), String::from_utf8_lossy(&magic_buf)));
+        return Err(format!(
+            "Magic 不匹配: 期望 {}, 实际 {}",
+            String::from_utf8_lossy(MAGIC),
+            String::from_utf8_lossy(&magic_buf)
+        ));
     }
 
     // header
@@ -320,12 +329,21 @@ pub fn parse_ims_and_read_cover(filepath: &str) -> Result<(ImsFileInfo, Vec<u8>)
                 c.read_exact(&mut hash_buf)
                     .map_err(|e| format!("读取图片 {} hash 失败: {}", i, e))?;
                 Some(hash_buf.iter().map(|b| format!("{:02x}", b)).collect())
-            } else { None }
-        } else { None };
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         images.push(ImsImage {
-            index: i, filename, format, data_offset, data_length,
-            is_cover: is_cover_byte != 0, hash,
+            index: i,
+            filename,
+            format,
+            data_offset,
+            data_length,
+            is_cover: is_cover_byte != 0,
+            hash,
         });
     }
 
@@ -341,15 +359,18 @@ pub fn parse_ims_and_read_cover(filepath: &str) -> Result<(ImsFileInfo, Vec<u8>)
         Vec::new()
     };
 
-    Ok((ImsFileInfo {
-        filepath: filepath.to_string(),
-        file_size,
-        version,
-        image_count,
-        data_start,
-        index_offset,
-        images,
-    }, cover_bytes))
+    Ok((
+        ImsFileInfo {
+            filepath: filepath.to_string(),
+            file_size,
+            version,
+            image_count,
+            data_start,
+            index_offset,
+            images,
+        },
+        cover_bytes,
+    ))
 }
 
 // ---- 文件夹扫描 ----
@@ -359,8 +380,7 @@ const SUPPORTED_EXTS: &[&str] = &["jpg", "jpeg", "png", "webp", "avif"];
 
 /// 扫描目录，返回排序后的可浏览文件列表
 pub fn scan_folder(dir_path: &str) -> Result<Vec<FolderEntry>, String> {
-    let dir = std::fs::read_dir(dir_path)
-        .map_err(|e| format!("读取目录失败: {}", e))?;
+    let dir = std::fs::read_dir(dir_path).map_err(|e| format!("读取目录失败: {}", e))?;
 
     let mut entries: Vec<FolderEntry> = dir
         .filter_map(|entry| {
@@ -384,20 +404,20 @@ pub fn scan_folder(dir_path: &str) -> Result<Vec<FolderEntry>, String> {
 
             let filename = path.file_name()?.to_str()?.to_string();
             let ext = path.extension()?.to_str()?.to_lowercase();
-            let stem = path.file_stem()?.to_str()?.to_lowercase();
+            let path_str = path.to_str()?.to_string();
 
-            let is_ims = stem.contains(".ims");
+            let is_ims = is_ims_file(&path_str);
             let is_supported = SUPPORTED_EXTS.contains(&ext.as_str());
 
             // 支持: .jpg .jpeg .png .ims.jpg .ims.png
-            if !is_supported {
+            if !is_ims && !is_supported {
                 return None;
             }
 
             let file_size = std::fs::metadata(&path).ok()?.len();
 
             Some(FolderEntry {
-                filepath: path.to_str()?.to_string(),
+                filepath: path_str,
                 filename,
                 is_ims,
                 file_size,
@@ -479,9 +499,19 @@ pub fn file_type_label(filepath: &str) -> String {
 /// 判断文件是否为 IMS 文件 (基于文件名模式)
 pub fn is_ims_file(filepath: &str) -> bool {
     let path = std::path::Path::new(filepath);
-    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-        stem.to_lowercase().contains(".ims")
-    } else {
-        false
-    }
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    [
+        ".ims",
+        ".ims.jpg",
+        ".ims.jpeg",
+        ".ims.png",
+        ".ims.webp",
+        ".ims.avif",
+    ]
+    .iter()
+    .any(|suffix| name.ends_with(suffix))
 }
