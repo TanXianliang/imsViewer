@@ -23,8 +23,9 @@ use ims::{
     FolderEntry, SaveImagePayload, SubImagePayload,
 };
 use ims_pack::{
-    compute_output_path, pack_ims, save_ims_entries_atomic, scan_ims_files, scan_multiple_folders,
-    upgrade_ims_file, BatchConfig, BatchExtractConfig, ProgressPayload, UpEntry,
+    compute_output_path, load_image_as_entry, pack_ims, save_ims_entries_atomic, scan_ims_files,
+    scan_multiple_folders, scan_multiple_folders_with_options, upgrade_ims_file, BatchConfig,
+    BatchExtractConfig, ImageGroup, ProgressPayload, UpEntry,
 };
 
 /// IMS 解析缓存：避免对同一文件反复调用 parse_ims（读取索引区）。
@@ -47,6 +48,8 @@ impl FolderScanState {
 
 /// 缓存最大条目数。IMS 元数据很小（每条 ~KB 级），64 条约几十 KB。
 const MAX_CACHE_ENTRIES: usize = 64;
+static EXPORT_WRITE_LOCK: Mutex<()> = Mutex::new(());
+static IMS_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 /// 带缓存的 parse_ims：命中缓存则直接返回，否则解析并写入缓存。
 /// 超过 MAX_CACHE_ENTRIES 时全部清空，防止无界增长。
@@ -405,7 +408,10 @@ async fn pick_file(app: tauri::AppHandle) -> Result<Option<String>, String> {
     let result = app
         .dialog()
         .file()
-        .add_filter("图片文件", &["jpg", "jpeg", "png", "ims", "ims.jpg", "ims.png"])
+        .add_filter(
+            "图片文件",
+            &["jpg", "jpeg", "png", "ims", "ims.jpg", "ims.png"],
+        )
         .add_filter("IMS 文件", &["ims", "ims.jpg", "ims.png"])
         .add_filter("普通图片", &["jpg", "jpeg", "png"])
         .add_filter("所有文件", &["*"])
@@ -603,38 +609,6 @@ fn sanitize_path_component(raw: &str, fallback: &str) -> String {
     name
 }
 
-fn ims_output_folder_name(filepath: &str) -> String {
-    let file_name = Path::new(filepath)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("ims");
-    let lower = file_name.to_lowercase();
-    for suffix in [
-        ".ims.jpg",
-        ".ims.jpeg",
-        ".ims.png",
-        ".ims.webp",
-        ".ims.avif",
-        ".ims",
-    ] {
-        if lower.ends_with(suffix) && file_name.len() > suffix.len() {
-            return sanitize_path_component(&file_name[..file_name.len() - suffix.len()], "ims");
-        }
-    }
-
-    let stem = Path::new(file_name)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("ims");
-    let stem_lower = stem.to_lowercase();
-    let trimmed = if stem_lower.ends_with(".ims") && stem.len() > 4 {
-        &stem[..stem.len() - 4]
-    } else {
-        stem
-    };
-    sanitize_path_component(trimmed, "ims")
-}
-
 fn output_image_filename(filename: &str, format: u8, index: usize) -> String {
     let fallback = format!("image_{:05}", index + 1);
     let file_name = Path::new(filename)
@@ -649,25 +623,6 @@ fn output_image_filename(filename: &str, format: u8, index: usize) -> String {
     format!("{}.{}", safe_stem, image_extension(format))
 }
 
-fn unique_dir_path(base: &Path, used: &mut HashSet<String>) -> PathBuf {
-    let parent = base.parent().unwrap_or_else(|| Path::new(""));
-    let name = base.file_name().and_then(|s| s.to_str()).unwrap_or("ims");
-
-    for n in 0.. {
-        let candidate = if n == 0 {
-            base.to_path_buf()
-        } else {
-            parent.join(format!("{}_{}", name, n))
-        };
-        let key = candidate.to_string_lossy().to_lowercase();
-        if used.insert(key) {
-            return candidate;
-        }
-    }
-
-    base.to_path_buf()
-}
-
 fn md5_hex(bytes: &[u8]) -> String {
     format!("{:x}", md5::compute(bytes))
 }
@@ -679,7 +634,8 @@ fn existing_file_md5(path: &Path) -> Result<Option<String>, String> {
     if !path.is_file() {
         return Err(format!("输出路径已存在且不是文件: {}", path.display()));
     }
-    let bytes = std::fs::read(path).map_err(|e| format!("读取已有文件失败 {}: {}", path.display(), e))?;
+    let bytes =
+        std::fs::read(path).map_err(|e| format!("读取已有文件失败 {}: {}", path.display(), e))?;
     Ok(Some(md5_hex(&bytes)))
 }
 
@@ -735,14 +691,19 @@ fn resolve_export_file_path(base: &Path, bytes: &[u8]) -> Result<PathBuf, String
 }
 
 fn write_export_image(base_path: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
+    let _guard = EXPORT_WRITE_LOCK
+        .lock()
+        .map_err(|e| format!("锁导出写入失败: {}", e))?;
     let out_path = resolve_export_file_path(base_path, bytes)?;
     if out_path.exists() {
         return Ok(out_path);
     }
     if let Some(parent) = out_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("创建输出目录失败 {}: {}", parent.display(), e))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("创建输出目录失败 {}: {}", parent.display(), e))?;
     }
-    std::fs::write(&out_path, bytes).map_err(|e| format!("写入失败 {}: {}", out_path.display(), e))?;
+    std::fs::write(&out_path, bytes)
+        .map_err(|e| format!("写入失败 {}: {}", out_path.display(), e))?;
     Ok(out_path)
 }
 
@@ -760,6 +721,209 @@ fn extract_ims_file_to_dir(filepath: &str, out_dir: &Path) -> Result<usize, Stri
     }
 
     Ok(saved)
+}
+
+fn source_path_key(path: &str) -> String {
+    path.replace('\\', "/").to_lowercase()
+}
+
+fn ims_filename_key(filename: &str) -> String {
+    filename.to_lowercase()
+}
+
+fn next_available_ims_filename(
+    original_filename: &str,
+    used_names: &HashSet<String>,
+) -> Result<String, String> {
+    if !used_names.contains(&ims_filename_key(original_filename)) {
+        return Ok(original_filename.to_string());
+    }
+
+    let file_name = Path::new(original_filename)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(original_filename);
+    let stem = Path::new(file_name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("image");
+    let ext = Path::new(file_name)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    let base_stem = numbered_base_stem(stem);
+
+    for number in 1..=99_999 {
+        let candidate = if ext.is_empty() {
+            format!("{}_{:05}_", base_stem, number)
+        } else {
+            format!("{}_{:05}_.{}", base_stem, number, ext)
+        };
+        if !used_names.contains(&ims_filename_key(&candidate)) {
+            return Ok(candidate);
+        }
+    }
+
+    Err(format!(
+        "No available numbered filename for {} (_00001_ to _99999_ are occupied)",
+        original_filename
+    ))
+}
+
+fn push_unique_path(paths: &mut Vec<String>, used: &mut HashSet<String>, path: &str) {
+    if used.insert(source_path_key(path)) {
+        paths.push(path.to_string());
+    }
+}
+
+fn existing_ims_candidates(base_name: &str) -> Vec<String> {
+    vec![
+        format!("{}.ims.jpg", base_name),
+        format!("{}.ims.jpeg", base_name),
+        format!("{}.ims.png", base_name),
+        format!("{}.ims.webp", base_name),
+        format!("{}.ims.avif", base_name),
+        format!("{}.ims", base_name),
+    ]
+}
+
+fn find_existing_ims_output_path(computed_path: &Path, base_name: &str) -> Option<PathBuf> {
+    if computed_path.is_file() {
+        return Some(computed_path.to_path_buf());
+    }
+
+    let parent = computed_path.parent()?;
+    for filename in existing_ims_candidates(base_name) {
+        let candidate = parent.join(filename);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+fn resolve_batch_convert_output_path(
+    group: &ImageGroup,
+    output_dir: &Option<String>,
+    preserve_structure: bool,
+    merge_existing_ims: bool,
+) -> String {
+    let computed = compute_output_path(group, output_dir, preserve_structure);
+    if merge_existing_ims {
+        if let Some(existing) =
+            find_existing_ims_output_path(Path::new(&computed), &group.base_name)
+        {
+            return existing.to_string_lossy().to_string();
+        }
+    }
+    computed
+}
+
+struct MergeSourceEntry {
+    path: String,
+    entry: UpEntry,
+    md5: String,
+    insert_candidate: bool,
+}
+
+struct MergeExistingResult {
+    inserted: usize,
+    skipped_existing: usize,
+    matched_existing: usize,
+    delete_files: Vec<String>,
+}
+
+fn merge_into_existing_ims(
+    output_path: &str,
+    match_paths: &[String],
+    insert_paths: &[String],
+) -> Result<MergeExistingResult, String> {
+    let _guard = IMS_WRITE_LOCK
+        .lock()
+        .map_err(|e| format!("Failed to lock IMS writer: {}", e))?;
+
+    let ims_info = parse_ims(output_path)?;
+    let mut entries: Vec<UpEntry> = Vec::with_capacity(ims_info.images.len() + insert_paths.len());
+    let mut existing_md5 = HashSet::new();
+    let mut used_names = HashSet::new();
+
+    for img in &ims_info.images {
+        let bytes = read_sub_image(output_path, img.data_offset, img.data_length)?;
+        existing_md5.insert(md5_hex(&bytes));
+        used_names.insert(ims_filename_key(&img.filename));
+        entries.push(UpEntry {
+            filename: img.filename.clone(),
+            format: img.format,
+            bytes,
+            is_cover: img.is_cover,
+        });
+    }
+
+    let insert_keys: HashSet<String> = insert_paths.iter().map(|p| source_path_key(p)).collect();
+    let mut seen_sources = HashSet::new();
+    let mut sources = Vec::new();
+
+    for path in match_paths {
+        if !seen_sources.insert(source_path_key(path)) {
+            continue;
+        }
+        let entry = load_image_as_entry(Path::new(path), false)?;
+        let md5 = md5_hex(&entry.bytes);
+        sources.push(MergeSourceEntry {
+            path: path.clone(),
+            entry,
+            md5,
+            insert_candidate: insert_keys.contains(&source_path_key(path)),
+        });
+    }
+
+    let matched_existing = sources
+        .iter()
+        .filter(|source| existing_md5.contains(&source.md5))
+        .count();
+
+    let mut inserted = 0usize;
+    let mut skipped_existing = 0usize;
+    let mut delete_files = Vec::new();
+    let mut delete_keys = HashSet::new();
+
+    for source in &sources {
+        if existing_md5.contains(&source.md5) {
+            push_unique_path(&mut delete_files, &mut delete_keys, &source.path);
+        }
+    }
+
+    for source in sources {
+        if !source.insert_candidate {
+            continue;
+        }
+        if existing_md5.contains(&source.md5) {
+            skipped_existing += 1;
+            continue;
+        }
+
+        let mut entry = source.entry;
+        entry.is_cover = false;
+        entry.filename = next_available_ims_filename(&entry.filename, &used_names)?;
+
+        existing_md5.insert(source.md5);
+        used_names.insert(ims_filename_key(&entry.filename));
+        push_unique_path(&mut delete_files, &mut delete_keys, &source.path);
+        entries.push(entry);
+        inserted += 1;
+    }
+
+    if inserted > 0 {
+        save_ims_entries_atomic(output_path, &entries)?;
+    }
+
+    Ok(MergeExistingResult {
+        inserted,
+        skipped_existing,
+        matched_existing,
+        delete_files,
+    })
 }
 
 /// 注册 imsViewer 到右键菜单"使用 imsViewer 打开"
@@ -835,25 +999,21 @@ async fn start_batch_extract(
         return Err("未发现 IMS 文件".into());
     }
 
-    let input_base = input_dir.parent().unwrap_or(input_dir.as_path());
-    let mut used_dirs = HashSet::new();
+    let input_base = input_dir.as_path();
     let mut tasks = Vec::with_capacity(files.len());
     for fp in files {
         let source_parent = Path::new(&fp).parent().unwrap_or(input_dir.as_path());
         let target_parent = if config.preserve_structure {
             let rel = source_parent
                 .strip_prefix(input_base)
-                .or_else(|_| source_parent.strip_prefix(&input_dir))
                 .unwrap_or_else(|_| Path::new(""));
             output_root.join(rel)
         } else {
             output_root.clone()
         };
-        let out_base = target_parent.join(ims_output_folder_name(&fp));
-        let output_dir = unique_dir_path(&out_base, &mut used_dirs);
         tasks.push(BatchExtractTask {
             input_path: fp,
-            output_dir,
+            output_dir: target_parent,
         });
     }
 
@@ -1144,7 +1304,11 @@ async fn start_batch_upgrade(
 #[tauri::command]
 async fn start_batch_convert(app: tauri::AppHandle, config: BatchConfig) -> Result<String, String> {
     // 1. 扫描所有文件夹，分组
-    let groups = scan_multiple_folders(&config.folders)?;
+    let groups = if config.merge_existing_ims {
+        scan_multiple_folders_with_options(&config.folders, true)?
+    } else {
+        scan_multiple_folders(&config.folders)?
+    };
     let total = groups.len() as u32;
 
     if total == 0 {
@@ -1165,7 +1329,9 @@ async fn start_batch_convert(app: tauri::AppHandle, config: BatchConfig) -> Resu
     // 2. 构建任务列表
     let output_dir = config.output_dir.clone();
     struct Task {
-        image_paths: Vec<String>,
+        cover_path: Option<String>,
+        sub_image_paths: Vec<String>,
+        match_paths: Vec<String>,
         output_path: String,
         source_files: Vec<String>,
         message: String,
@@ -1174,18 +1340,38 @@ async fn start_batch_convert(app: tauri::AppHandle, config: BatchConfig) -> Resu
     let tasks: Vec<Task> = groups
         .iter()
         .map(|g| {
-            let output_filename = format!("{}.ims.{}", g.base_name, g.cover_ext);
-            let output_path = compute_output_path(g, &output_dir, config.preserve_structure);
+            let output_path = resolve_batch_convert_output_path(
+                g,
+                &output_dir,
+                config.preserve_structure,
+                config.merge_existing_ims,
+            );
+            let output_filename = Path::new(&output_path)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or(&output_path)
+                .to_string();
 
-            let mut image_paths = vec![g.cover.to_string_lossy().to_string()];
-            let mut source_files = vec![g.cover.to_string_lossy().to_string()];
+            let cover_path = g.cover.as_ref().map(|p| p.to_string_lossy().to_string());
+            let mut sub_image_paths = Vec::new();
+            let mut match_paths = Vec::new();
+            let mut source_files = Vec::new();
+
+            if let Some(cover) = &cover_path {
+                match_paths.push(cover.clone());
+                source_files.push(cover.clone());
+            }
             for (_, sub_path) in &g.sub_images {
-                image_paths.push(sub_path.to_string_lossy().to_string());
-                source_files.push(sub_path.to_string_lossy().to_string());
+                let source = sub_path.to_string_lossy().to_string();
+                sub_image_paths.push(source.clone());
+                match_paths.push(source.clone());
+                source_files.push(source);
             }
 
             Task {
-                image_paths,
+                cover_path,
+                sub_image_paths,
+                match_paths,
                 output_path,
                 source_files,
                 message: format!("已转换 {}", output_filename),
@@ -1196,17 +1382,48 @@ async fn start_batch_convert(app: tauri::AppHandle, config: BatchConfig) -> Resu
     // 3. 执行转换
     let delete_source = config.delete_source;
     let multi = config.multi_threaded;
+    let merge_existing_ims = config.merge_existing_ims;
     let app_handle = app.clone();
 
     std::thread::spawn(move || {
-        let convert = |task: &Task| -> Result<(), String> {
-            pack_ims(&task.image_paths, 0, &task.output_path)?;
+        let convert = |task: &Task| -> Result<String, String> {
+            if merge_existing_ims && Path::new(&task.output_path).is_file() {
+                let merge = merge_into_existing_ims(
+                    &task.output_path,
+                    &task.match_paths,
+                    &task.sub_image_paths,
+                )?;
+                if delete_source {
+                    for src in &merge.delete_files {
+                        let _ = std::fs::remove_file(src);
+                    }
+                }
+                return Ok(format!(
+                    "已合并 {}（新增 {}，已存在 {}，MD5 命中 {}）",
+                    Path::new(&task.output_path)
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or(&task.output_path),
+                    merge.inserted,
+                    merge.skipped_existing,
+                    merge.matched_existing
+                ));
+            }
+
+            let cover_path = task.cover_path.as_ref().ok_or_else(|| {
+                format!("目标 IMS 不存在且没有封面，无法创建: {}", task.output_path)
+            })?;
+            let mut image_paths = Vec::with_capacity(1 + task.sub_image_paths.len());
+            image_paths.push(cover_path.clone());
+            image_paths.extend(task.sub_image_paths.clone());
+
+            pack_ims(&image_paths, 0, &task.output_path)?;
             if delete_source {
                 for src in &task.source_files {
                     let _ = std::fs::remove_file(src);
                 }
             }
-            Ok(())
+            Ok(task.message.clone())
         };
 
         let result = if multi {
@@ -1217,14 +1434,14 @@ async fn start_batch_convert(app: tauri::AppHandle, config: BatchConfig) -> Resu
             let has_error = AtomicBool::new(false);
 
             tasks.par_iter().for_each(|task| match convert(task) {
-                Ok(()) => {
+                Ok(message) => {
                     let current = completed.fetch_add(1, Ordering::SeqCst) + 1;
                     let _ = app_handle.emit(
                         "batch-progress",
                         ProgressPayload {
                             current,
                             total,
-                            message: task.message.clone(),
+                            message,
                             status: "running".into(),
                         },
                     );
@@ -1250,21 +1467,23 @@ async fn start_batch_convert(app: tauri::AppHandle, config: BatchConfig) -> Resu
             }
         } else {
             let mut completed: u32 = 0;
+            let mut has_error = false;
             for task in &tasks {
                 match convert(task) {
-                    Ok(()) => {
+                    Ok(message) => {
                         completed += 1;
                         let _ = app_handle.emit(
                             "batch-progress",
                             ProgressPayload {
                                 current: completed,
                                 total,
-                                message: task.message.clone(),
+                                message,
                                 status: "running".into(),
                             },
                         );
                     }
                     Err(e) => {
+                        has_error = true;
                         let _ = app_handle.emit(
                             "batch-progress",
                             ProgressPayload {
@@ -1277,7 +1496,11 @@ async fn start_batch_convert(app: tauri::AppHandle, config: BatchConfig) -> Resu
                     }
                 }
             }
-            Ok(())
+            if has_error {
+                Err("存在转换失败".into())
+            } else {
+                Ok(())
+            }
         };
 
         match result {

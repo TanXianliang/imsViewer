@@ -1037,6 +1037,7 @@ function collectBatchConfig() {
     multi_threaded: $('#chk-multi-thread').checked,
     output_dir: outputDir || null,
     preserve_structure: $('#chk-preserve-structure').checked,
+    merge_existing_ims: $('#chk-merge-existing-ims').checked,
   };
 }
 

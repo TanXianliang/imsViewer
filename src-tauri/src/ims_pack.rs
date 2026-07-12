@@ -19,7 +19,7 @@ const HASH_ALGO_SHA256: u8 = 1;
 #[derive(Debug)]
 pub struct ImageGroup {
     pub base_name: String,
-    pub cover: PathBuf,
+    pub cover: Option<PathBuf>,
     pub sub_images: Vec<(u32, PathBuf)>, // (seq_number, path)
     pub cover_ext: String,               // "jpg" or "png"
     pub source_dir: PathBuf,             // 文件所在的目录
@@ -34,6 +34,8 @@ pub struct BatchConfig {
     pub multi_threaded: bool,
     pub output_dir: Option<String>,
     pub preserve_structure: bool,
+    #[serde(default)]
+    pub merge_existing_ims: bool,
 }
 
 /// 批量解压配置（从前端传入）
@@ -234,6 +236,14 @@ pub fn pack_ims(
 
 /// 扫描文件夹，将图片按 base_name 分组
 pub fn scan_and_group(input_folder: &str, max_depth: u32) -> Result<Vec<ImageGroup>, String> {
+    scan_and_group_with_options(input_folder, max_depth, false)
+}
+
+pub fn scan_and_group_with_options(
+    input_folder: &str,
+    max_depth: u32,
+    allow_subimage_only: bool,
+) -> Result<Vec<ImageGroup>, String> {
     let dir_path = Path::new(input_folder);
     if !dir_path.is_dir() {
         return Err(format!("目录不存在: {}", input_folder));
@@ -312,20 +322,28 @@ pub fn scan_and_group(input_folder: &str, max_depth: u32) -> Result<Vec<ImageGro
             continue;
         }
         let cover = match cover_opt {
-            Some(c) => c,
-            None => {
+            Some(c) => Some(c),
+            None if !allow_subimage_only => {
                 // 无封面时，尝试用 00001 号子图替代
                 if let Some(pos) = sub_images.iter().position(|(seq, _)| *seq == 1) {
                     let (_, cover_path) = sub_images.remove(pos);
-                    cover_path
+                    Some(cover_path)
                 } else {
                     continue;
                 }
             }
+            None => None,
         };
         sub_images.sort_by_key(|(seq, _)| *seq);
 
-        let raw_ext = cover
+        let ext_source = cover
+            .as_ref()
+            .or_else(|| sub_images.first().map(|(_, path)| path));
+        let Some(ext_source) = ext_source else {
+            continue;
+        };
+
+        let raw_ext = ext_source
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("jpg")
@@ -482,11 +500,87 @@ fn write_ims_entries(output_path: &str, entries: &[UpEntry]) -> Result<(), Strin
     Ok(())
 }
 
+#[derive(Debug, Clone)]
 pub struct UpEntry {
     pub filename: String,
     pub format: u8,
     pub bytes: Vec<u8>,
     pub is_cover: bool,
+}
+
+pub fn load_image_as_entry(path: &Path, is_cover: bool) -> Result<UpEntry, String> {
+    if !path.exists() {
+        return Err(format!("Source file does not exist: {}", path.display()));
+    }
+
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let format: u8 = match ext.as_str() {
+        "jpg" | "jpeg" => 0,
+        "png" => 1,
+        "webp" => 2,
+        "avif" => 3,
+        _ => {
+            return Err(format!(
+                "Unsupported image format: {} (jpg/jpeg/png/webp/avif only)",
+                path.display()
+            ))
+        }
+    };
+
+    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+        if stem.to_lowercase().contains(".ims") {
+            return Err(format!(
+                "Cannot use an existing IMS file as source: {}",
+                path.display()
+            ));
+        }
+    }
+
+    let filename = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let raw_bytes = std::fs::read(path)
+        .map_err(|e| format!("Failed to read source file {}: {}", path.display(), e))?;
+
+    let (bytes, final_format, final_filename) = if format == 2 || format == 3 {
+        let img = image::load_from_memory(&raw_bytes).map_err(|e| {
+            format!(
+                "Failed to decode {}: {} ({})",
+                path.display(),
+                e,
+                if format == 2 { "WebP" } else { "AVIF" }
+            )
+        })?;
+        let mut png_bytes = Vec::new();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut png_bytes),
+            image::ImageFormat::Png,
+        )
+        .map_err(|e| format!("Failed to encode PNG {}: {}", path.display(), e))?;
+        let new_name = format!(
+            "{}.png",
+            Path::new(&filename)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("image")
+        );
+        (png_bytes, 1u8, new_name)
+    } else {
+        (raw_bytes, format, filename)
+    };
+
+    Ok(UpEntry {
+        filename: final_filename,
+        format: final_format,
+        bytes,
+        is_cover,
+    })
 }
 
 /// 原子写入 IMS 文件：先写临时文件，成功后再替换目标文件
@@ -524,9 +618,20 @@ pub fn save_ims_entries_atomic(output_path: &str, entries: &[UpEntry]) -> Result
 
 /// 扫描多个文件夹，汇总所有 ImageGroup
 pub fn scan_multiple_folders(folders: &[FolderConfig]) -> Result<Vec<ImageGroup>, String> {
+    scan_multiple_folders_with_options(folders, false)
+}
+
+pub fn scan_multiple_folders_with_options(
+    folders: &[FolderConfig],
+    allow_subimage_only: bool,
+) -> Result<Vec<ImageGroup>, String> {
     let mut all_groups = Vec::new();
     for folder in folders {
-        let groups = scan_and_group(&folder.path, folder.depth)?;
+        let groups = if allow_subimage_only {
+            scan_and_group_with_options(&folder.path, folder.depth, true)?
+        } else {
+            scan_and_group(&folder.path, folder.depth)?
+        };
         all_groups.extend(groups);
     }
     Ok(all_groups)
@@ -535,7 +640,9 @@ pub fn scan_multiple_folders(folders: &[FolderConfig]) -> Result<Vec<ImageGroup>
 /// 计算输出路径
 ///
 /// 若指定了 output_dir，则按输入目录结构镜像输出：
-/// 例如 input="Input1/tex0", output_dir="Output" → "Output/Input1/tex0/file.ims.jpg"
+/// 例如 input="Input1/tex0", output_dir="Output"：
+/// - "Input1/tex0/file.jpg" → "Output/file.ims.jpg"
+/// - "Input1/tex0/sub/file.jpg" → "Output/sub/file.ims.jpg"
 ///
 /// 若未指定 output_dir，则直接输出到源文件所在目录（原地转换）
 pub fn compute_output_path(
@@ -546,10 +653,8 @@ pub fn compute_output_path(
     let output_filename = format!("{}.ims.{}", group.base_name, group.cover_ext);
     if let Some(out_dir) = output_dir {
         if preserve_structure {
-            // 用 input_folder 的父目录作为基准，保留输入文件夹名本身
-            let input_base = Path::new(&group.input_folder)
-                .parent()
-                .unwrap_or(Path::new(&group.input_folder));
+            // 所选输入目录本身对应输出根目录，只有其子目录会被保留。
+            let input_base = Path::new(&group.input_folder);
             let rel = group
                 .source_dir
                 .strip_prefix(input_base)
@@ -566,7 +671,45 @@ pub fn compute_output_path(
         group
             .source_dir
             .join(&output_filename)
-            .to_string_lossy()
-            .to_string()
+        .to_string_lossy()
+        .to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn group_in(source_dir: &str) -> ImageGroup {
+        ImageGroup {
+            base_name: "0".into(),
+            cover: None,
+            sub_images: Vec::new(),
+            cover_ext: "jpg".into(),
+            source_dir: PathBuf::from(source_dir),
+            input_folder: "input".into(),
+        }
+    }
+
+    #[test]
+    fn output_root_matches_selected_input_folder() {
+        let output_dir = Some("output".into());
+        let output = compute_output_path(&group_in("input"), &output_dir, true);
+
+        assert_eq!(output, Path::new("output").join("0.ims.jpg").to_string_lossy());
+    }
+
+    #[test]
+    fn output_keeps_only_child_directories_of_selected_input_folder() {
+        let output_dir = Some("output".into());
+        let output = compute_output_path(&group_in("input/1"), &output_dir, true);
+
+        assert_eq!(
+            output,
+            Path::new("output")
+                .join("1")
+                .join("0.ims.jpg")
+                .to_string_lossy()
+        );
     }
 }
