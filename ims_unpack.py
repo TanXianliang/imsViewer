@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import os
 import struct
+import zlib
 from pathlib import Path
 
 # IMS 文件格式常量
@@ -20,9 +21,54 @@ FOOTER_OFFSET_STRUCT = struct.Struct("<I")
 # 单条 entry 的固定部分: name_len(2) + format(1) + data_offset(4) + data_length(4) + is_cover(1)
 # name 为变长，需单独读取
 ENTRY_FIXED_STRUCT = struct.Struct("<B I I B")  # format, data_offset, data_length, is_cover
+THUMBNAIL_MAGIC = b"IMSTHMB\0"
+THUMBNAIL_TRAILER_STRUCT = struct.Struct("<8s H B B I I H H I I")
 
 FORMAT_NAMES = {0: "JPEG", 1: "PNG"}
 FORMAT_EXTENSIONS = {0: ".jpg", 1: ".png"}
+
+
+def parse_thumbnail(data: bytes, index_offset: int) -> dict | None:
+    trailer_offset = len(data) - FOOTER_OFFSET_STRUCT.size - THUMBNAIL_TRAILER_STRUCT.size
+    if trailer_offset < 0 or data[trailer_offset:trailer_offset + 8] != THUMBNAIL_MAGIC:
+        return None
+
+    (
+        magic,
+        version,
+        fmt,
+        flags,
+        data_offset,
+        data_length,
+        width,
+        height,
+        expected_crc32,
+        reserved,
+    ) = THUMBNAIL_TRAILER_STRUCT.unpack_from(data, trailer_offset)
+    if magic != THUMBNAIL_MAGIC or version != 1:
+        raise ValueError("不支持的 IMS 缩略图 Trailer")
+    if fmt != 0:
+        raise ValueError(f"不支持的 IMS 缩略图格式: {fmt}")
+    if data_length <= 0 or data_offset + data_length > index_offset:
+        raise ValueError("IMS 缩略图数据越界")
+    if width <= 0 or height <= 0:
+        raise ValueError("IMS 缩略图尺寸无效")
+
+    thumbnail_bytes = data[data_offset:data_offset + data_length]
+    actual_crc32 = zlib.crc32(thumbnail_bytes) & 0xffffffff
+    return {
+        "version": version,
+        "format": fmt,
+        "format_name": "JPEG",
+        "flags": flags,
+        "data_offset": data_offset,
+        "data_length": data_length,
+        "width": width,
+        "height": height,
+        "crc32": expected_crc32,
+        "crc32_valid": actual_crc32 == expected_crc32,
+        "reserved": reserved,
+    }
 
 
 def parse_ims(filepath: str) -> dict:
@@ -71,31 +117,52 @@ def parse_ims(filepath: str) -> dict:
     if magic != MAGIC:
         raise ValueError(f"Magic 不匹配: 期望 {MAGIC!r}，实际 {magic!r}")
 
-    if version != 1:
+    if version not in (1, 2):
         raise ValueError(f"不支持的 IMS 版本: {version}")
+
+    thumbnail = parse_thumbnail(data, index_offset)
+    metadata_end = (
+        file_size - FOOTER_OFFSET_STRUCT.size - THUMBNAIL_TRAILER_STRUCT.size
+        if thumbnail is not None
+        else file_size - FOOTER_OFFSET_STRUCT.size
+    )
+    image_data_end = thumbnail["data_offset"] if thumbnail is not None else index_offset
 
     # 3. 遍历 entries
     pos = index_offset + HEADER_SIZE
     images = []
 
     for i in range(image_count):
-        if pos + 2 > file_size:
+        if pos + 2 > metadata_end:
             raise ValueError(f"文件损坏: 无法读取图片 {i} 的名称长度")
 
         name_len = struct.unpack_from("<H", data, pos)[0]
         pos += 2
 
-        if pos + name_len > file_size:
+        if pos + name_len > metadata_end:
             raise ValueError(f"文件损坏: 无法读取图片 {i} 的名称")
 
         name = data[pos:pos + name_len].decode("utf-8")
         pos += name_len
 
-        if pos + ENTRY_FIXED_STRUCT.size > file_size:
+        if pos + ENTRY_FIXED_STRUCT.size > metadata_end:
             raise ValueError(f"文件损坏: 无法读取图片 {i} 的条目信息")
 
         fmt, data_offset, data_length, is_cover_byte = ENTRY_FIXED_STRUCT.unpack_from(data, pos)
         pos += ENTRY_FIXED_STRUCT.size
+        if data_length <= 0 or data_offset + data_length > image_data_end:
+            raise ValueError(f"文件损坏: 图片 {i} 数据越界")
+
+        hash_hex = None
+        if version >= 2:
+            if pos + 33 > metadata_end:
+                raise ValueError(f"文件损坏: 无法读取图片 {i} 的 SHA-256")
+            hash_algorithm = data[pos]
+            pos += 1
+            hash_bytes = data[pos:pos + 32]
+            pos += 32
+            if hash_algorithm == 1:
+                hash_hex = hash_bytes.hex()
 
         images.append({
             "index": i,
@@ -105,6 +172,7 @@ def parse_ims(filepath: str) -> dict:
             "data_offset": data_offset,
             "data_length": data_length,
             "is_cover": bool(is_cover_byte),
+            "hash": hash_hex,
         })
 
     return {
@@ -115,6 +183,7 @@ def parse_ims(filepath: str) -> dict:
         "data_start": data_start,
         "index_offset": index_offset,
         "images": images,
+        "thumbnail": thumbnail,
     }
 
 
@@ -153,6 +222,13 @@ def list_images(info: dict) -> None:
     print(f"大小: {info['file_size']:,} bytes")
     print(f"版本: {info['version']}")
     print(f"图片数量: {info['image_count']}")
+    thumbnail = info.get("thumbnail")
+    if thumbnail:
+        crc_status = "通过" if thumbnail["crc32_valid"] else "失败"
+        print(
+            f"内嵌缩略图: {thumbnail['width']}x{thumbnail['height']} "
+            f"{thumbnail['data_length']:,} bytes, CRC32 {crc_status}"
+        )
     print()
     print(f"{'索引':>4}  {'封面':>4}  {'格式':>6}  {'偏移':>10}  {'大小':>10}  文件名")
     print("-" * 70)

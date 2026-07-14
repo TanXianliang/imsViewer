@@ -107,7 +107,7 @@ IMS 图片浏览器 — 基于 Tauri v2 的三栏图片浏览与批量转换工�
 1. 打开 **工具 → 批量升级 IMS**
 2. 选择包含 IMS 文件的目录，设置遍历深度（0=无限）
 3. 可选多线程加速
-4. 点击 **开始升级** — 将旧版 IMS 文件就地升级到 v2（追加 SHA-256 哈希）
+4. 点击 **开始升级** — 将旧版 IMS 文件就地升级到 v2（追加 SHA-256 哈希），并为缺少 Trailer 的 v2 文件补写内嵌缩略图
 
 ### CLI 工具 (Python)
 
@@ -134,11 +134,16 @@ IMS (Image Set) 是一种轻量图片容器格式，将封面图 + 多张子图�
 [子图 1 数据]
 [子图 2 数据]
 ...
-[索引尾部: IMSIMAGE + header + entries + index_offset(4B)]
+[160px JPEG 缩略图数据]
+[索引: IMSIMAGE + header + entries]
+[IMSTHMB Trailer (32B)]
+[index_offset (4B)]
 ```
 
 - 封面在文件最前端 → 普通图片查看器可显示封面
 - 尾部索引记录每张图的偏移和长度 → IMS 查看器可切换子图
+- 固定位置的 `IMSTHMB` Trailer 记录缩略图偏移、长度、尺寸和 CRC32 → 远程浏览只需读取尾部 36B 和缩略图数据
+- 旧版 IMS 没有 Trailer 时仍可正常解析，并可通过索引分段读取封面
 - 子图无限制，支持 JPEG / PNG / WebP / AVIF（WebP/AVIF 自动转 PNG）
 - **v2**: 每张子图附带 SHA-256 内容哈希，支持完整性校验
 

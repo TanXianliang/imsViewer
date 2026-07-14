@@ -7,13 +7,115 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 /// IMS 文件魔数
 const MAGIC: &[u8; 8] = b"IMSIMAGE";
 const VERSION: u16 = 2;
 const HASH_ALGO_SHA256: u8 = 1;
+const THUMBNAIL_MAGIC: &[u8; 8] = b"IMSTHMB\0";
+const THUMBNAIL_VERSION: u16 = 1;
+const THUMBNAIL_FORMAT_JPEG: u8 = 0;
+const THUMBNAIL_MAX_SIZE: u32 = 160;
+const THUMBNAIL_JPEG_QUALITY: u8 = 60;
+
+struct EmbeddedThumbnail {
+    bytes: Vec<u8>,
+    width: u16,
+    height: u16,
+    crc32: u32,
+}
+
+fn create_embedded_thumbnail(source_bytes: &[u8]) -> Result<EmbeddedThumbnail, String> {
+    let decoded = image::load_from_memory(source_bytes)
+        .map_err(|error| format!("生成缩略图时解码封面失败: {}", error))?;
+    let rgba = decoded
+        .thumbnail(THUMBNAIL_MAX_SIZE, THUMBNAIL_MAX_SIZE)
+        .to_rgba8();
+    let width = rgba.width();
+    let height = rgba.height();
+    let mut rgb = image::RgbImage::new(width, height);
+
+    for (column, row, source_pixel) in rgba.enumerate_pixels() {
+        let alpha = source_pixel[3] as u16;
+        let target_pixel = rgb.get_pixel_mut(column, row);
+        for channel_index in 0..3 {
+            let source_channel = source_pixel[channel_index] as u16;
+            target_pixel[channel_index] =
+                ((source_channel * alpha + 255 * (255 - alpha) + 127) / 255) as u8;
+        }
+    }
+
+    let mut bytes = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, THUMBNAIL_JPEG_QUALITY)
+        .encode(rgb.as_raw(), width, height, image::ExtendedColorType::Rgb8)
+        .map_err(|error| format!("编码 IMS 缩略图失败: {}", error))?;
+
+    Ok(EmbeddedThumbnail {
+        crc32: crc32fast::hash(&bytes),
+        bytes,
+        width: u16::try_from(width).map_err(|_| "IMS 缩略图宽度超出范围")?,
+        height: u16::try_from(height).map_err(|_| "IMS 缩略图高度超出范围")?,
+    })
+}
+
+fn write_thumbnail_trailer<W: Write>(
+    writer: &mut W,
+    thumbnail: &EmbeddedThumbnail,
+    thumbnail_offset: u32,
+) -> Result<(), String> {
+    writer
+        .write_all(THUMBNAIL_MAGIC)
+        .map_err(|error| format!("写入缩略图 magic 失败: {}", error))?;
+    writer
+        .write_u16::<LittleEndian>(THUMBNAIL_VERSION)
+        .map_err(|error| format!("写入缩略图版本失败: {}", error))?;
+    writer
+        .write_u8(THUMBNAIL_FORMAT_JPEG)
+        .map_err(|error| format!("写入缩略图格式失败: {}", error))?;
+    writer
+        .write_u8(0)
+        .map_err(|error| format!("写入缩略图 flags 失败: {}", error))?;
+    writer
+        .write_u32::<LittleEndian>(thumbnail_offset)
+        .map_err(|error| format!("写入缩略图偏移失败: {}", error))?;
+    writer
+        .write_u32::<LittleEndian>(thumbnail.bytes.len() as u32)
+        .map_err(|error| format!("写入缩略图长度失败: {}", error))?;
+    writer
+        .write_u16::<LittleEndian>(thumbnail.width)
+        .map_err(|error| format!("写入缩略图宽度失败: {}", error))?;
+    writer
+        .write_u16::<LittleEndian>(thumbnail.height)
+        .map_err(|error| format!("写入缩略图高度失败: {}", error))?;
+    writer
+        .write_u32::<LittleEndian>(thumbnail.crc32)
+        .map_err(|error| format!("写入缩略图 CRC32 失败: {}", error))?;
+    writer
+        .write_u32::<LittleEndian>(0)
+        .map_err(|error| format!("写入缩略图 reserved 失败: {}", error))?;
+    Ok(())
+}
+
+fn has_embedded_thumbnail(filepath: &str) -> Result<bool, String> {
+    let mut file = std::fs::File::open(filepath)
+        .map_err(|error| format!("打开 IMS 文件失败: {}", error))?;
+    let file_size = file
+        .metadata()
+        .map_err(|error| format!("读取 IMS 文件信息失败: {}", error))?
+        .len();
+    if file_size < 36 {
+        return Ok(false);
+    }
+
+    file.seek(SeekFrom::End(-36))
+        .map_err(|error| format!("定位 IMS 缩略图 Trailer 失败: {}", error))?;
+    let mut magic = [0u8; 8];
+    file.read_exact(&mut magic)
+        .map_err(|error| format!("读取 IMS 缩略图 Trailer 失败: {}", error))?;
+    Ok(&magic == THUMBNAIL_MAGIC)
+}
 
 /// 图片组：一个封面 + 若干子图，记录来源文件夹
 #[derive(Debug)]
@@ -163,6 +265,7 @@ pub fn pack_ims(
 
     // 封面排在第一位
     entries.sort_by_key(|e| !e.is_cover);
+    let thumbnail = create_embedded_thumbnail(&entries[0].bytes)?;
 
     // 计算累计偏移量
     let mut offsets: Vec<u32> = Vec::with_capacity(count);
@@ -171,7 +274,10 @@ pub fn pack_ims(
         offsets.push(cumulative);
         cumulative += entry.bytes.len() as u32;
     }
-    let index_offset = cumulative;
+    let thumbnail_offset = cumulative;
+    let index_offset = thumbnail_offset
+        .checked_add(thumbnail.bytes.len() as u32)
+        .ok_or("IMS 文件大小超出格式限制")?;
 
     // 确保输出目录存在
     if let Some(parent) = Path::new(output_path).parent() {
@@ -188,6 +294,8 @@ pub fn pack_ims(
         out.write_all(&entry.bytes)
             .map_err(|e| format!("写入图片数据失败: {}", e))?;
     }
+    out.write_all(&thumbnail.bytes)
+        .map_err(|e| format!("写入缩略图数据失败: {}", e))?;
 
     // 2. 写入 index footer
     out.write_all(MAGIC)
@@ -224,6 +332,8 @@ pub fn pack_ims(
         out.write_all(&hash)
             .map_err(|e| format!("写入 hash 失败: {}", e))?;
     }
+
+    write_thumbnail_trailer(&mut out, &thumbnail, thumbnail_offset)?;
 
     // 4. 写入 index_offset
     out.write_u32::<LittleEndian>(index_offset)
@@ -372,14 +482,14 @@ pub fn scan_and_group_with_options(
 
 // ---- IMS 版本升级 ----
 
-/// 将旧版 IMS 文件升级到 v2（添加 SHA-256 hash）
+/// 将旧版 IMS 文件升级到 v2，并为缺少缩略图的 v2 文件补写 Trailer。
 pub fn upgrade_ims_file(filepath: &str) -> Result<(), String> {
     use crate::ims::{parse_ims, read_sub_image};
 
     let ims_info = parse_ims(filepath)?;
 
-    // 已经是 v2+，跳过
-    if ims_info.version >= 2 {
+    // 已经是 v2 且包含内嵌缩略图，跳过
+    if ims_info.version >= 2 && has_embedded_thumbnail(filepath)? {
         return Ok(());
     }
 
@@ -441,6 +551,9 @@ pub fn scan_ims_files(dir: &str, max_depth: u32) -> Vec<String> {
 
 /// 直接写入 IMS v2 文件（内部用，接受已读取的字节数据）
 fn write_ims_entries(output_path: &str, entries: &[UpEntry]) -> Result<(), String> {
+    if entries.is_empty() {
+        return Err("图片列表为空".into());
+    }
     let count = entries.len();
     let mut offsets: Vec<u32> = Vec::with_capacity(count);
     let mut cumulative: u32 = 0;
@@ -448,7 +561,15 @@ fn write_ims_entries(output_path: &str, entries: &[UpEntry]) -> Result<(), Strin
         offsets.push(cumulative);
         cumulative += e.bytes.len() as u32;
     }
-    let index_offset = cumulative;
+    let cover = entries
+        .iter()
+        .find(|entry| entry.is_cover)
+        .unwrap_or(&entries[0]);
+    let thumbnail = create_embedded_thumbnail(&cover.bytes)?;
+    let thumbnail_offset = cumulative;
+    let index_offset = thumbnail_offset
+        .checked_add(thumbnail.bytes.len() as u32)
+        .ok_or("IMS 文件大小超出格式限制")?;
 
     if let Some(parent) = Path::new(output_path).parent() {
         std::fs::create_dir_all(parent).ok();
@@ -460,6 +581,8 @@ fn write_ims_entries(output_path: &str, entries: &[UpEntry]) -> Result<(), Strin
         out.write_all(&e.bytes)
             .map_err(|e| format!("写入数据失败: {}", e))?;
     }
+    out.write_all(&thumbnail.bytes)
+        .map_err(|e| format!("写入缩略图数据失败: {}", e))?;
 
     out.write_all(MAGIC)
         .map_err(|e| format!("写入 magic 失败: {}", e))?;
@@ -493,6 +616,8 @@ fn write_ims_entries(output_path: &str, entries: &[UpEntry]) -> Result<(), Strin
         out.write_all(&hash)
             .map_err(|e| format!("写入 hash 失败: {}", e))?;
     }
+
+    write_thumbnail_trailer(&mut out, &thumbnail, thumbnail_offset)?;
 
     out.write_u32::<LittleEndian>(index_offset)
         .map_err(|e| format!("写入 index_offset 失败: {}", e))?;
@@ -711,5 +836,38 @@ mod tests {
                 .join("0.ims.jpg")
                 .to_string_lossy()
         );
+    }
+
+    #[test]
+    fn embedded_thumbnail_trailer_contains_valid_metadata() {
+        let source = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            480,
+            320,
+            image::Rgba([40, 80, 120, 128]),
+        ));
+        let mut source_bytes = Vec::new();
+        source
+            .write_to(
+                &mut std::io::Cursor::new(&mut source_bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+
+        let thumbnail = create_embedded_thumbnail(&source_bytes).unwrap();
+        let mut trailer = Vec::new();
+        write_thumbnail_trailer(&mut trailer, &thumbnail, 1234).unwrap();
+
+        assert_eq!(trailer.len(), 32);
+        assert_eq!(&trailer[0..8], THUMBNAIL_MAGIC);
+        assert_eq!(u16::from_le_bytes(trailer[8..10].try_into().unwrap()), 1);
+        assert_eq!(u32::from_le_bytes(trailer[12..16].try_into().unwrap()), 1234);
+        assert_eq!(
+            u32::from_le_bytes(trailer[16..20].try_into().unwrap()),
+            thumbnail.bytes.len() as u32
+        );
+        assert_eq!(u32::from_le_bytes(trailer[24..28].try_into().unwrap()), thumbnail.crc32);
+        assert_eq!(thumbnail.crc32, crc32fast::hash(&thumbnail.bytes));
+        assert!(thumbnail.width <= THUMBNAIL_MAX_SIZE as u16);
+        assert!(thumbnail.height <= THUMBNAIL_MAX_SIZE as u16);
     }
 }

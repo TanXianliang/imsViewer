@@ -7,15 +7,50 @@ IMS 图片打包工具
 from __future__ import annotations
 
 import argparse
+import io
 import os
 import struct
+import zlib
 from pathlib import Path
+
+from PIL import Image, ImageOps
 
 # IMS 文件格式常量
 MAGIC = b"IMSIMAGE"
 VERSION = 1  # uint16 LE
 HEADER_STRUCT = struct.Struct("<8s H I I")   # magic, version, image_count, data_start
 FOOTER_OFFSET_STRUCT = struct.Struct("<I")    # index_offset
+THUMBNAIL_MAGIC = b"IMSTHMB\0"
+THUMBNAIL_VERSION = 1
+THUMBNAIL_FORMAT_JPEG = 0
+THUMBNAIL_MAX_SIZE = 160
+THUMBNAIL_JPEG_QUALITY = 60
+THUMBNAIL_TRAILER_STRUCT = struct.Struct("<8s H B B I I H H I I")
+
+
+def create_embedded_thumbnail(cover_bytes: bytes) -> tuple[bytes, int, int]:
+    """从封面生成适合远程目录预览的极小 JPEG 缩略图。"""
+    with Image.open(io.BytesIO(cover_bytes)) as source:
+        thumbnail = ImageOps.exif_transpose(source)
+        resampling = getattr(Image, "Resampling", Image).LANCZOS
+        thumbnail.thumbnail((THUMBNAIL_MAX_SIZE, THUMBNAIL_MAX_SIZE), resampling)
+
+        if thumbnail.mode in ("RGBA", "LA") or "transparency" in thumbnail.info:
+            rgba = thumbnail.convert("RGBA")
+            flattened = Image.new("RGB", rgba.size, "white")
+            flattened.paste(rgba, mask=rgba.getchannel("A"))
+            thumbnail = flattened
+        else:
+            thumbnail = thumbnail.convert("RGB")
+
+        output = io.BytesIO()
+        thumbnail.save(
+            output,
+            format="JPEG",
+            quality=THUMBNAIL_JPEG_QUALITY,
+            optimize=True,
+        )
+        return output.getvalue(), thumbnail.width, thumbnail.height
 
 
 def pack_images(image_paths: list[str], cover_index: int, output_path: str) -> None:
@@ -53,6 +88,7 @@ def pack_images(image_paths: list[str], cover_index: int, output_path: str) -> N
 
     # 2. 将 entries 按封面在前重排
     entries.sort(key=lambda e: not e["is_cover"])  # 封面排第一
+    thumbnail_bytes, thumbnail_width, thumbnail_height = create_embedded_thumbnail(entries[0]["raw"])
 
     # 3. 构建索引条目数据
     entry_binaries: list[bytes] = []
@@ -73,19 +109,39 @@ def pack_images(image_paths: list[str], cover_index: int, output_path: str) -> N
     for eb in entry_binaries:
         index_data += eb
 
-    # 4. 计算索引区偏移（先写入所有图片数据，再写入索引区）
+    # 4. 计算缩略图和索引区偏移
     total_data_size = sum(len(e["raw"]) for e in entries)
-    index_offset = total_data_size
+    thumbnail_offset = total_data_size
+    index_offset = thumbnail_offset + len(thumbnail_bytes)
+    thumbnail_crc32 = zlib.crc32(thumbnail_bytes) & 0xffffffff
+    thumbnail_trailer = THUMBNAIL_TRAILER_STRUCT.pack(
+        THUMBNAIL_MAGIC,
+        THUMBNAIL_VERSION,
+        THUMBNAIL_FORMAT_JPEG,
+        0,
+        thumbnail_offset,
+        len(thumbnail_bytes),
+        thumbnail_width,
+        thumbnail_height,
+        thumbnail_crc32,
+        0,
+    )
 
     # 5. 写入输出文件
     with open(output_path, "wb") as f:
         for entry in entries:
             f.write(entry["raw"])
+        f.write(thumbnail_bytes)
         f.write(index_data)
+        f.write(thumbnail_trailer)
         f.write(FOOTER_OFFSET_STRUCT.pack(index_offset))
 
     print(f"打包完成: {output_path}")
     print(f"  共 {len(entries)} 张图片，封面: {entries[0]['filename']}")
+    print(
+        f"  [缩略图] {thumbnail_width}x{thumbnail_height} "
+        f"({len(thumbnail_bytes)} bytes, offset={thumbnail_offset})"
+    )
     for i, entry in enumerate(entries):
         tag = "[封面]" if entry["is_cover"] else f"[图片{i}]"
         print(f"  {tag} {entry['filename']} ({len(entry['raw'])} bytes)")

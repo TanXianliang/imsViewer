@@ -25,3 +25,4 @@ regex = "1"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 sha2 = "0.10"
 md5 = "0.7"
+crc32fast = "1"

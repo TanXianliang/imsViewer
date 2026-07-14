@@ -1,49 +1,68 @@
-"""验证 IMS 文件格式是否正确"""
-import os
-import struct
-import sys
+"""验证 IMS 文件索引、图片范围和内嵌缩略图。"""
+from __future__ import annotations
 
-MAGIC = b"IMSIMAGE"
+import argparse
+import zlib
 
-with open("test_output.ims.jpg", "rb") as f:
-    data = f.read()
+from ims_unpack import parse_ims
 
-file_size = len(data)
 
-# 读取末尾 4 字节 → index_offset
-index_offset = struct.unpack_from("<I", data, file_size - 4)[0]
-print(f"文件大小: {file_size} bytes")
-print(f"索引偏移: {index_offset}")
+def verify(filepath: str) -> None:
+    info = parse_ims(filepath)
+    print(f"文件大小: {info['file_size']:,} bytes")
+    print(f"版本: {info['version']}, 图片数量: {info['image_count']}")
+    print(f"索引偏移: {info['index_offset']}")
 
-# 验证 magic
-magic = data[index_offset:index_offset + 8]
-assert magic == MAGIC, f"Magic 不匹配: {magic}"
-print(f"Magic 正确: {magic}")
+    with open(filepath, "rb") as file:
+        data = file.read()
 
-# 读取 header
-version, image_count, data_start = struct.unpack_from("<H I I", data, index_offset + 8)
-print(f"版本: {version}, 图片数量: {image_count}, 数据起始: {data_start}")
+    covers = 0
+    thumbnail = info.get("thumbnail")
+    image_data_end = thumbnail["data_offset"] if thumbnail else info["index_offset"]
+    for image in info["images"]:
+        start = image["data_offset"]
+        end = start + image["data_length"]
+        assert end <= image_data_end, f"图片 {image['filename']} 数据越界"
+        extracted = data[start:end]
+        if image["format"] == 0:
+            valid = extracted.startswith(b"\xff\xd8")
+        elif image["format"] == 1:
+            valid = extracted.startswith(b"\x89PNG\r\n\x1a\n")
+        else:
+            valid = bool(extracted)
+        assert valid, f"图片 {image['filename']} 格式签名无效"
+        covers += int(image["is_cover"])
+        print(
+            f"  图片{image['index']}: {image['filename']} | "
+            f"offset={start} len={image['data_length']} | cover={image['is_cover']}"
+        )
 
-# 读取 entries
-pos = index_offset + 8 + 2 + 4 + 4  # magic(8) + version(2) + count(4) + data_start(4) = 18
-for i in range(image_count):
-    name_len = struct.unpack_from("<H", data, pos)[0]
-    pos += 2
-    name = data[pos:pos + name_len].decode("utf-8")
-    pos += name_len
-    fmt, data_off, data_len, is_cover_byte = struct.unpack_from("<B I I B", data, pos)
-    pos += 1 + 4 + 4 + 1
-    is_cover = bool(is_cover_byte)
-    fmt_name = "JPEG" if fmt == 0 else "PNG"
-    cover_tag = " [封面]" if is_cover else ""
-    # 验证提取的数据
-    extracted = data[data_off:data_off + data_len]
-    valid = extracted[:2] == b'\xff\xd8' if fmt == 0 else extracted[:8] == b'\x89PNG\r\n\x1a\n'
-    print(f"  图片{i}: {name} | {fmt_name} | offset={data_off} len={data_len} | cover={is_cover} | 有效={valid}")
+    assert covers == 1, f"封面数量应为 1，实际为 {covers}"
 
-# 验证封面数据是有效 JPEG
-cover_start = data[0:2]
-assert cover_start == b'\xff\xd8', f"文件开头不是 JPEG SOI 标记: {cover_start.hex()}"
-print(f"\n封面 JPEG SOI 标记正确: {cover_start.hex()}")
+    if thumbnail:
+        start = thumbnail["data_offset"]
+        end = start + thumbnail["data_length"]
+        assert end == info["index_offset"], "缩略图应紧邻 IMS 索引"
+        thumbnail_bytes = data[start:end]
+        assert thumbnail_bytes.startswith(b"\xff\xd8"), "内嵌缩略图不是 JPEG"
+        actual_crc32 = zlib.crc32(thumbnail_bytes) & 0xffffffff
+        assert actual_crc32 == thumbnail["crc32"], "内嵌缩略图 CRC32 不匹配"
+        print(
+            f"内嵌缩略图: {thumbnail['width']}x{thumbnail['height']} | "
+            f"offset={start} len={thumbnail['data_length']} | CRC32 通过"
+        )
+    else:
+        print("内嵌缩略图: 无（兼容旧 IMS）")
 
-print("\n所有验证通过!")
+    print("所有验证通过!")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="验证 IMS 文件格式")
+    parser.add_argument("input", nargs="?", default="test_output.ims.jpg")
+    args = parser.parse_args()
+    verify(args.input)
+
+
+if __name__ == "__main__":
+    main()
