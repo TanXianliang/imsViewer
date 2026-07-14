@@ -1,6 +1,6 @@
 # imsViewer Android 首版开发计划
 
-更新日期：2026-06-17  
+更新日期：2026-07-14
 参考文档：[ANDROID_IMAGE_VIEWER_RESEARCH.md](ANDROID_IMAGE_VIEWER_RESEARCH.md)、[DESIGN.md](DESIGN.md)
 
 ## 1. 首版定位
@@ -26,7 +26,7 @@
 
 ## 2. 当前工程状态
 
-当前仓库原本没有 `android/` 工程目录。本轮从零创建 Android 工程基线，入口位于：
+Android 工程已可独立完成 Debug/Release 构建，入口位于：
 
 - `android/settings.gradle.kts`
 - `android/build.gradle.kts`
@@ -240,14 +240,16 @@
 目标：生成可验收 APK。
 
 - [x] 快速切图时取消旧解码任务。
-- [ ] 限制 bitmap/thumbnail 缓存。
+- [x] Folder 缩略图限制为最多 160 项，远程文件缓存支持容量上限。
+- [ ] IMS 子图 bitmap 缓存增加独立上限。
 - [ ] 大图降采样和 OOM 防护。
 - [ ] 后台计算 SHA-256。
 - [ ] 增加关键单元测试。
 - [x] 增加手动验收样例清单。
 - [x] 运行 debug 构建。
-- [ ] 运行 release 构建。
-- [ ] 生成签名 APK 或 release artifact。
+- [x] 运行 release 构建。
+- [x] 生成 release artifact：`bin/android/imsViewer-android-release.apk`。
+- [ ] 配置正式签名；当前 release artifact 为 unsigned APK。
 
 验收：
 - 快速左右滑 20 次不崩溃。
@@ -262,6 +264,9 @@
 首版远程方案：
 - [x] 增加 `Open Network` / SFTP 入口。
 - [x] 实现 SFTP 连接配置：host、port、username、password、remote root path。
+- [x] 支持保存多个独立连接记录，`Add Network` 不覆盖已有连接。
+- [x] 密码默认隐藏并可临时查看，支持选择是否保存密码。
+- [x] 保存的密码使用 Android Keystore AES-GCM 加密，SharedPreferences 仅保存 IV 和密文。
 - [x] 首版使用账号密码登录，默认端口 `22`。
 - [x] 使用 SFTP 列出远程目录和子目录。
 - [x] 过滤支持格式：`.ims`、`.ims.jpg`、`.ims.png`、JPEG、PNG、WebP、AVIF。
@@ -271,8 +276,6 @@
 - [x] 点击远程文件后，整文件下载到 App cache。
 - [x] 下载完成后复用现有本地 IMS/图片解析和查看逻辑。
 - [x] 左右滑在当前远程目录文件序列中切换。
-  - 当前问题：点击远程图片后只下载当前文件，并以单元素 `fileSequence` 进入 Viewer；`openNextFile()` / `openPreviousFile()` 因序列长度为 `1` 直接返回。
-  - 根因：`remoteEntries` 与本地 `fileSequence` 相互独立，当前没有远程文件序列、当前远程索引，以及滑动后下载相邻远程文件的逻辑。
   - [x] 在 ViewModel 中保存当前远程目录的支持文件序列和当前索引，过滤掉目录项。
   - [x] 左右滑时后台下载上一/下一远程文件，显示切换中状态，下载完成后复用本地 Viewer 打开。
   - [x] 复用已下载缓存，避免来回滑动重复下载，并处理取消、失败和文件已删除等情况。
@@ -285,6 +288,7 @@
 - 能连接 QNAP SFTP 服务并列出指定远程目录。
 - 能打开 NAS 上的普通图片。
 - 能打开 NAS 上的 `.ims` / `.ims.jpg` / `.ims.png`。
+- 远程目录可后台显示普通图片和 IMS 的真实缩略图。
 - 远程目录内左右滑可切换上一/下一支持文件。
 - 大文件下载时 UI 不冻结，有明确进度或加载提示。
 - 网络失败或账号错误时不崩溃，并给出可理解提示。
@@ -298,13 +302,13 @@
 
 后续可优化：
 - [ ] 支持 SSH 私钥登录。
-- [ ] 支持保存多个 NAS 连接配置。
-- [ ] 使用 Android Keystore / EncryptedSharedPreferences 保存敏感信息。
-- [ ] 增加最近远程目录和最近打开记录。
+- [x] 支持保存多个 NAS 连接配置。
+- [x] 使用 Android Keystore AES-GCM 加密可选保存的密码。
+- [x] 增加最近远程连接和最近打开记录。
 - [ ] 下载前后各一张预取，减少左右切换等待。
 - [x] 缩略图按需下载并缓存，远程列表可显示真实缩略图。
-- [ ] 增加缓存上限，例如最近 20 个文件或 1GB。
-- [ ] 增加缓存清理入口。
+- [x] 设置页可配置网络缓存上限，默认 512MB。
+- [x] 设置页提供 `Clear network cache`，同时清理文件和缩略图缓存。
 - [ ] 支持断点续传或失败重试策略。
 - [x] 支持 SFTP 随机读/分段读，避免生成 IMS 目录缩略图时下载整个文件。
 - [ ] 支持 FTPS / WebDAV 作为其他 NAS 协议来源。
@@ -317,7 +321,7 @@
 
 - [x] 首页分为 `Open File`、`Open Folder`、`Open Network` 三页。
 - [x] File/Folder 打开后记录历史。
-- [x] Network 支持新增 host/path 记录。
+- [x] Network 支持新增多个 host/path 记录。
 - [x] 每条记录支持独立删除。
 - [x] 设置入口支持清空当前类型记录。
 - [x] 查看页顶部/侧边入口改为回首页/回目录。
@@ -372,6 +376,13 @@ $env:JAVA_HOME='C:\Program Files\Eclipse Adoptium\jdk-17.0.19.10-hotspot'
 $env:ANDROID_HOME='C:\Users\monst\AppData\Local\Android\Sdk'
 cd android
 .\gradlew.bat :app:assembleDebug
+```
+
+Release 构建从仓库根目录执行：
+
+```powershell
+.\buildrelease_apk.bat
+# 输出：bin/android/imsViewer-android-release.apk（当前未签名）
 ```
 
 ## 7. 手动验收清单

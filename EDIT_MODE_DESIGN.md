@@ -190,6 +190,7 @@ Phase 1-5 全部完成，所有编辑功能闭环可用。代码位于 `src/app.
 - **退出确认**：三按钮对话框（保存 / 不保存 / 取消）
 - **非 IMS 支持**：打开普通图片可进入编辑，插入子图后自动存为 IMS
 - **格式自动转换**：WebP/AVIF → PNG
+- **IMS 最新格式**：保存或另存为多图 IMS 时自动生成 160px JPEG 缩略图、CRC32 和 `IMSTHMB` Trailer
 
 ### 与设计方案的主要差异
 
@@ -200,6 +201,7 @@ Phase 1-5 全部完成，所有编辑功能闭环可用。代码位于 `src/app.
 | 退出确认 | 简单 confirm() | 自定义三按钮模态对话框 |
 | Undo/Redo | 独立编辑文件 | 纯 JS 实现，集成在 `src/app.js` |
 | 保存 | 仅覆盖原文件 | 覆盖 + 另存为 + 原子写入 |
+| 格式扩展 | 仅重写 entries | 重写 v2 SHA-256，并自动刷新内嵌缩略图 Trailer |
 | 文件结构 | 仅 `save_ims` | `save_ims` + `pick_save_path` + `save_ims_entries_atomic` |
 
 ## 总结

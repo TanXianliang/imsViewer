@@ -789,6 +789,8 @@ Box(modifier = Modifier.fillMaxSize()) {
 
 - 大图解码要按视口降采样，避免把完整超大图直接解码到内存。
 - IMS 子图缩略图应异步生成，并限制并发数量。
+- SFTP 目录中的新 IMS 应先读取尾部 36B，再按 `IMSTHMB` Trailer 分段读取 160px 内嵌缩略图；旧 IMS 回退到“索引 + 封面”分段读取。
+- 远程缩略图生成、读取和磁盘缓存必须在后台协程执行，目录切换时取消旧任务。
 - 切换文件时预加载前后各一张，但不要一次性解码整个目录。
 - 图片拖拽和缩放必须保持 60fps 优先，元数据计算如 SHA-256 放后台。
 - 工具栏显示/隐藏动画要短，建议 120-180ms。
@@ -806,7 +808,16 @@ imsViewer Android 不应做成完整相册 App。更合适的定位是“本地�
 
 推荐首版 UI 目标：打开即看、图片最大、手势自然、信息可查但不打扰。
 
-## 9. 参考资料
+## 9. 当前实现状态（2026-07-14）
+
+- 首页已实现 `Open File`、`Open Folder`、`Open Network` 三分页及独立历史记录。
+- SFTP 已支持多个连接、可选加密保存密码、目录浏览、远程文件左右滑切换。
+- Folder 和 Network 目录缩略图均在后台生成；远程 IMS 优先读取内嵌缩略图。
+- 网络缓存默认上限 512MB，可在设置中修改或手动清空，退出 App 不主动清理。
+- 新 IMS 使用 v2 索引和兼容的 `IMSTHMB` Trailer；Trailer 不代表 v3。
+- Debug 与 Release 构建均已通过，Release artifact 当前未签名。
+
+## 10. 参考资料
 
 - Google Photos Play Store：<https://play.google.com/store/apps/details?id=com.google.android.apps.photos>
 - Google Photos 官方介绍：<https://www.google.com/photos/about/>

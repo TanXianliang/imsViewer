@@ -7,6 +7,7 @@ IMS 图片浏览器 — 基于 Tauri v2 的三栏图片浏览与批量转换工�
 ### 图片浏览
 - **三栏布局**: 缩略图列表 | 画布显示 | 信息面板
 - **IMS 容器支持**: 解析多子图 IMS 文件，按 `↑` `↓` 切换子图
+- **内嵌目录缩略图**: 新 IMS 自动写入 160px JPEG 和 `IMSTHMB` Trailer，兼容旧解析器
 - **文件夹导航**: `←` `→` 切换同目录文件，滚轮快捷操作
 - **Canvas 渲染**: 缩放（Ctrl+滚轮）、平移（拖拽）、适应窗口 / 原始尺寸
 - **拖放打开/插入**: 浏览模式拖入直接打开文件，编辑模式拖入批量插入图片
@@ -33,6 +34,7 @@ IMS 图片浏览器 — 基于 Tauri v2 的三栏图片浏览与批量转换工�
 - **IMS 插入**: 插入 IMS 文件时自动提取其全部子图
 - **Undo/Redo**: `Ctrl+Z` 撤销 / `Ctrl+Y` 重做，30 步栈深度
 - **原子写入**: 先写 `.tmp` 再替换，保存失败不损坏原文件
+- **格式刷新**: 保存 IMS 时重建 v2 SHA-256 和内嵌缩略图 Trailer
 
 ### 批量转换
 - 多文件夹批量扫描，按命名规范自动分组
@@ -41,14 +43,18 @@ IMS 图片浏览器 — 基于 Tauri v2 的三栏图片浏览与批量转换工�
 - 多线程并行转换 (rayon)
 - 可选转换后删除源文件
 - 实时进度条
+- 新生成的桌面端 IMS 使用 v2 索引，并内嵌远程目录缩略图
 
-## 截图
+### Android
 
-![imsViewer 主界面](ui_design/icon.png)
+- SAF 本地文件/目录浏览，支持 IMS/JPEG/PNG/WebP/AVIF
+- SFTP 多连接、可选加密保存密码、远程目录真实缩略图和同目录左右滑切换
+- 新 IMS 通过尾部 Trailer 分段读取缩略图；旧 IMS 回退为索引 + 封面分段读取
+- 网络缓存默认 512MB，可在设置中修改和手动清理
 
 ## 安装
 
-从 [Releases](../../releases) 下载 `imsViewer_1.0.0_x64-setup.exe` 安装，或直接下载 `imsViewer.exe` 免安装运行。
+从项目 Releases 页面下载 `imsViewer_1.0.0_x64-setup.exe` 安装，或直接下载 `imsViewer.exe` 免安装运行。
 
 > 需要 Windows 10+ (内置 WebView2)。
 
@@ -125,6 +131,8 @@ python ims_unpack.py -a file.ims.jpg -o out_dir/
 python ims_batch.py ./images/
 ```
 
+Python 打包器写入兼容的 v1 基础条目和 `IMSTHMB` Trailer；桌面端打包器写入当前 v2 条目。可通过批量升级统一为最新 v2。
+
 ## IMS 格式
 
 IMS (Image Set) 是一种轻量图片容器格式，将封面图 + 多张子图合并为单个文件。
@@ -142,7 +150,7 @@ IMS (Image Set) 是一种轻量图片容器格式，将封面图 + 多张子图�
 
 - 封面在文件最前端 → 普通图片查看器可显示封面
 - 尾部索引记录每张图的偏移和长度 → IMS 查看器可切换子图
-- 固定位置的 `IMSTHMB` Trailer 记录缩略图偏移、长度、尺寸和 CRC32 → 远程浏览只需读取尾部 36B 和缩略图数据
+- 固定位置的 `IMSTHMB` Trailer 记录 160px、质量 60 JPEG 的偏移、长度、尺寸和 CRC32 → 远程浏览只需读取尾部 36B 和缩略图数据
 - 旧版 IMS 没有 Trailer 时仍可正常解析，并可通过索引分段读取封面
 - 子图无限制，支持 JPEG / PNG / WebP / AVIF（WebP/AVIF 自动转 PNG）
 - **v2**: 每张子图附带 SHA-256 内容哈希，支持完整性校验
@@ -171,9 +179,13 @@ npm install
 # 开发模式
 npm run tauri dev
 
-# 构建发布
-npm run tauri build
-# → src-tauri/target/release/imsViewer.exe
+# Windows 发布构建
+.\buildrelease.bat
+# → bin/win32/imsViewer.exe
+
+# Android Release artifact
+.\buildrelease_apk.bat
+# → bin/android/imsViewer-android-release.apk（当前未签名）
 ```
 
 ## 技术栈

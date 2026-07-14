@@ -254,7 +254,6 @@ src-tauri/src/
 // ims.rs
 use serde::Serialize;
 use byteorder::{LittleEndian, ReadBytesExt};
-use std::io::Cursor;
 
 pub const MAGIC: &[u8; 8] = b"IMSIMAGE";
 
@@ -292,65 +291,9 @@ pub struct FolderEntry {
 
 ### 6.3 解析函数
 
-```rust
-pub fn parse_ims(filepath: &str) -> Result<ImsFileInfo, String> {
-    let data = std::fs::read(filepath).map_err(|e| e.to_string())?;
-    let file_size = data.len() as u64;
-    
-    // 末尾 4 字节 → index_offset
-    let index_offset = {
-        let mut cursor = Cursor::new(&data[file_size as usize - 4..]);
-        cursor.read_u32::<LittleEndian>().unwrap()
-    };
-    
-    let mut cursor = Cursor::new(&data[index_offset as usize..]);
-    
-    // 验证 magic
-    let mut magic_buf = [0u8; 8];
-    cursor.read_exact(&mut magic_buf).map_err(|e| e.to_string())?;
-    if &magic_buf != MAGIC {
-        return Err("无效的 IMS 文件: magic 不匹配".into());
-    }
-    
-    // 读取 header
-    let version = cursor.read_u16::<LittleEndian>().unwrap();
-    let image_count = cursor.read_u32::<LittleEndian>().unwrap();
-    let data_start = cursor.read_u32::<LittleEndian>().unwrap();
-    
-    // 遍历 entries
-    let mut images = Vec::with_capacity(image_count as usize);
-    for i in 0..image_count as usize {
-        let name_len = cursor.read_u16::<LittleEndian>().unwrap() as usize;
-        let mut name_buf = vec![0u8; name_len];
-        cursor.read_exact(&mut name_buf).map_err(|e| e.to_string())?;
-        let filename = String::from_utf8_lossy(&name_buf).to_string();
-        
-        let format = cursor.read_u8().unwrap();
-        let data_offset = cursor.read_u32::<LittleEndian>().unwrap();
-        let data_length = cursor.read_u32::<LittleEndian>().unwrap();
-        let is_cover = cursor.read_u8().unwrap() != 0;
-        
-        images.push(ImsImage {
-            index: i,
-            filename,
-            format,
-            data_offset,
-            data_length,
-            is_cover,
-        });
-    }
-    
-    Ok(ImsFileInfo {
-        filepath: filepath.into(),
-        file_size,
-        version,
-        image_count,
-        data_start,
-        index_offset,
-        images,
-    })
-}
-```
+当前 Rust 解析器不整读 IMS：先读取末尾 4 字节获得 `index_offset`，再只读取索引区。v1 读取基础条目，v2 额外读取 33 字节 SHA-256 元数据。索引后的 `IMSTHMB` Trailer 属于可选兼容扩展，旧文件没有 Trailer 仍可正常解析。
+
+完整二进制布局和 Trailer 字段定义以 [DESIGN.md](DESIGN.md) 为准。
 
 ---
 
@@ -624,7 +567,15 @@ regex = "1"
 - 前端信息面板显示（前 20 字符 + 悬浮完整）
 - 解析器向后兼容 v1（无 hash 字段）
 
-### 13.7 架构
+### 13.7 IMS 内嵌目录缩略图
+
+- 打包和编辑保存时，从封面生成最长边 160px、质量 60 的 JPEG。
+- 缩略图位于图片数据与索引之间，不作为普通 entry，不会出现在子图列表。
+- 索引后写入固定 32 字节 `IMSTHMB` Trailer，最后 4 字节仍为 `index_offset`。
+- Trailer 是向后兼容扩展，不将 IMS 版本提升到 v3。
+- 批量升级会为缺少 Trailer 的 v2 文件补写缩略图。
+
+### 13.8 架构
 
 ```
 前端模态框                    Rust 后端                      文件系统
@@ -650,13 +601,13 @@ listen("batch-progress")  ←
 
 ### 14.2 功能
 
-将旧版 IMS 文件（v1）就地升级到 v2，追加 SHA-256 内容哈希。
+将旧版 IMS 文件（v1）就地升级到 v2，追加 SHA-256 内容哈希；已有 v2 若缺少 `IMSTHMB` Trailer，也会重写并补充内嵌缩略图。
 
 | 功能 | 说明 |
 |------|------|
 | 目录扫描 | 选择目录递归扫描所有 IMS 文件 |
 | 深度控制 | 同批量转换，0=无限遍历 |
-| 版本检测 | 自动跳过已是 v2+ 的文件 |
+| 版本检测 | 仅跳过已是 v2 且包含有效 Trailer 的文件 |
 | 多线程 | 可选 rayon 并行升级 |
 | 实时进度 | 进度条 + 文件名反馈 |
 
@@ -664,7 +615,8 @@ listen("batch-progress")  ←
 
 1. 解析旧 IMS，读取全部子图数据
 2. 以 v2 格式重新写入（封面排第一，每张子图追加 SHA-256 hash）
-3. 写入临时文件后替换原文件（保证原子性）
+3. 生成 160px JPEG 缩略图并写入 `IMSTHMB` Trailer
+4. 写入临时文件后替换原文件（保证原子性）
 
 ---
 

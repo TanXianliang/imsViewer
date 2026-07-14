@@ -6,6 +6,7 @@ IMS（Image Set）是一种自定义图片容器格式，将多张图片打包�
 
 - **封面兼容**：打包文件以 `.jpg` 或 `.png` 结尾，标准图片查看器打开后仅显示封面图。
 - **多图封装**：文件内部包含封面在内的多张原始图片数据，可由专用浏览器（imsViewer）解析查看。
+- **远程预览**：新文件内嵌最长边 160px、质量 60 的 JPEG 缩略图，SFTP 浏览无需下载整个 IMS。
 - **防嵌套**：不允许将 `.ims.*` 文件作为源图片打包，防止嵌套结构。
 
 ## 2. 文件格式规范
@@ -30,24 +31,31 @@ IMS（Image Set）是一种自定义图片容器格式，将多张图片打包�
 │       图片 N-1 原始数据           │  最后一张额外图片
 │                                 │
 ├─────────────────────────────────┤
-│      IMS 索引区 (Footer)         │  见 2.2 节
+│      内嵌 JPEG 缩略图             │  最长边 160px，质量 60
+├─────────────────────────────────┤  ← index_offset
+│      IMS 索引区                  │  header + entries
+├─────────────────────────────────┤
+│      IMSTHMB Trailer (32B)       │  缩略图位置、尺寸、CRC32
+├─────────────────────────────────┤
+│      index_offset (4B LE)        │  始终位于文件最后 4 字节
 └─────────────────────────────────┘  ← 文件末尾
 ```
 
 **关键原理**：JPEG 解码器遇到 EOI 标记 (`0xFF 0xD9`)、PNG 解码器读到 IEND chunk 后即停止读取。封面数据放在文件最前面，其结束标记之后的所有数据对标准查看器透明。专用浏览器则通过末尾索引区定位所有图片。
 
-### 2.2 索引区 (Footer) 结构
+### 2.2 索引区结构
 
 索引区位于文件末尾，从后向前读取：
 
 | 偏移（相对索引区起始） | 大小    | 字段           | 说明                               |
 |----------------------|---------|---------------|------------------------------------|
 | 0                    | 8 字节  | magic         | 固定值 `"IMSIMAGE"` (ASCII)        |
-| 8                    | 2 字节  | version       | 格式版本，当前为 `0x0001` (LE)      |
+| 8                    | 2 字节  | version       | 索引版本，桌面端当前写入 `0x0002` (LE) |
 | 10                   | 4 字节  | image_count   | 图片总数（含封面），uint32 LE       |
 | 14                   | 4 字节  | data_start    | 图片数据区起始偏移（即封面起始=0）   |
 | 18                   | N×M 字节| entries       | 图片条目列表，见下表                |
-| 18 + N×M             | 4 字节  | index_offset  | 索引区自身在文件中的起始偏移 (LE)    |
+
+`index_offset` 不属于索引区，始终保存在文件最后 4 字节。Python CLI 当前写入 v1 基础条目；桌面端写入 v2 条目。两者都写入相同的可选缩略图 Trailer。
 
 #### 图片条目 (Per-Image Entry)
 
@@ -55,14 +63,38 @@ IMS（Image Set）是一种自定义图片容器格式，将多张图片打包�
 |------|---------|--------------|-----------------------------|
 | 0    | 2 字节  | name_len     | 原始文件名长度（字节）       |
 | 2    | 变长    | name         | 原始文件名（UTF-8，含扩展名）|
-| 2+N  | 1 字节  | format       | 图片格式: 0=JPEG, 1=PNG     |
+| 2+N  | 1 字节  | format       | 0=JPEG, 1=PNG, 2=WebP, 3=AVIF |
 | 3+N  | 4 字节  | data_offset  | 该图片数据在文件中的起始偏移  |
 | 7+N  | 4 字节  | data_length  | 该图片数据的字节数           |
 | 11+N | 1 字节  | is_cover     | 是否为封面: 0=否, 1=是      |
 
-**单条条目大小**：12 + name_len 字节。
+**v1 单条条目大小**：12 + name_len 字节。
 
-### 2.3 解析流程
+v2 在基础条目后追加 33 字节内容哈希：
+
+| 大小 | 字段 | 说明 |
+|------|------|------|
+| 1 字节 | hash_algorithm | `1` = SHA-256 |
+| 32 字节 | hash | SHA-256 原始字节 |
+
+### 2.3 缩略图 Trailer
+
+新 IMS 在最后 4 字节 `index_offset` 之前写入固定 32 字节 Trailer。它是兼容扩展，不提升 IMS 索引版本；旧解析器读取完 entries 后会自然忽略它。
+
+| 相对 Trailer 偏移 | 大小 | 字段 | 说明 |
+|---|---:|---|---|
+| 0 | 8 | magic | 固定 `IMSTHMB\0` |
+| 8 | 2 | version | Trailer 版本，当前为 `1` |
+| 10 | 1 | format | `0` = JPEG |
+| 11 | 1 | flags | 当前为 `0` |
+| 12 | 4 | thumbnail_offset | 缩略图绝对偏移，uint32 LE |
+| 16 | 4 | thumbnail_length | 缩略图长度，uint32 LE |
+| 20 | 2 | width | 缩略图宽度，uint16 LE |
+| 22 | 2 | height | 缩略图高度，uint16 LE |
+| 24 | 4 | crc32 | 缩略图 CRC32，uint32 LE |
+| 28 | 4 | reserved | 保留，当前为 `0` |
+
+### 2.4 解析流程
 
 ```
 1. 读取文件末尾 4 字节 → 获得 index_offset
@@ -72,8 +104,13 @@ IMS（Image Set）是一种自定义图片容器格式，将多张图片打包�
    c. 读取 image_count（4 字节）
    d. 读取 data_start（4 字节，应为 0）
 3. 遍历 image_count 次，读取每张图片的条目信息
-4. 根据 data_offset + data_length 提取每张图片的原始数据
+   - v1：读取基础条目
+   - v2：额外读取 hash_algorithm + SHA-256
+4. 检查倒数第 36~5 字节是否为 IMSTHMB Trailer
+5. 根据 data_offset + data_length 提取每张图片的原始数据
 ```
+
+SFTP 目录缩略图只读取尾部 36 字节。存在 Trailer 时再读取 `thumbnail_offset/thumbnail_length`；旧 IMS 则读取索引并仅分段读取封面。
 
 ---
 
@@ -101,8 +138,9 @@ python ims_pack.py <image1> <image2> ... <imageN> --cover <index> -o <output>
 2. 拒绝 `.ims.jpg` / `.ims.png` 作为源图片（防嵌套）
 3. 封面排在第一，保持原始格式（JPEG 或 PNG）写入
 4. 依次写入其余图片原始数据
-5. 构建索引区并写入文件末尾
-6. 输出 `.ims.{ext}` 文件（扩展名与封面一致）
+5. 从封面生成最长边 160px、质量 60 的 JPEG 缩略图，透明区域铺白底
+6. 写入索引、32 字节 Trailer 和最后 4 字节 `index_offset`
+7. 输出 `.ims.{ext}` 文件（扩展名与封面一致）
 
 ### 3.4 封面处理
 
@@ -184,18 +222,19 @@ python ims_unpack.py <input.ims.jpg> [options]
 ```
 1. 读取文件末尾 4 字节 → 获得 index_offset
 2. 从 index_offset 处验证 magic，读取 version、image_count
-3. 遍历 image_count 次，读取每张图片的条目信息
-4. 根据 data_offset + data_length 从文件中提取图片原始数据
-5. 按原始格式（JPEG/PNG）写入目标目录
+3. 按 v1/v2 规则遍历图片条目
+4. 解析可选 IMSTHMB Trailer 并校验缩略图 CRC32
+5. 根据 data_offset + data_length 从文件中提取图片原始数据
+6. 按原始格式写入目标目录
 ```
 
 ---
 
-## 6. 工具设计：ims_viewer.py（后续开发）
+## 6. imsViewer 桌面端与 Android 端
 
 ### 6.1 功能
 
-专用图片浏览器，可打开 `.ims.*` 文件并浏览其内部所有图片。
+桌面端和 Android 端均可打开 `.ims.*` 文件并浏览其内部所有图片。
 
 ### 6.2 核心能力
 
@@ -203,6 +242,7 @@ python ims_unpack.py <input.ims.jpg> [options]
 - 以封面作为首屏显示
 - 提供缩略图浏览 / 前后翻页功能
 - 支持导出单张或全部原始图片
+- Android SFTP 目录使用 Trailer/索引分段读取远程缩略图
 
 ---
 
@@ -221,5 +261,5 @@ python ims_unpack.py <input.ims.jpg> [options]
 
 ## 8. 依赖
 
-- Python 3.8+
-- [Pillow](https://python-pillow.org/) — 用于测试图片生成，ims_pack / ims_unpack 本身不依赖 Pillow
+- Python 3.10+
+- [Pillow](https://python-pillow.org/) 9.0+ — `ims_pack.py` 用于生成内嵌 JPEG 缩略图
