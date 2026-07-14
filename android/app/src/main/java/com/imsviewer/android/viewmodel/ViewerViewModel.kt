@@ -196,6 +196,8 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
                 remoteTitle = null,
                 remotePath = "/",
                 remoteEntries = emptyList(),
+                remoteFileSequence = emptyList(),
+                remoteFileIndex = -1,
                 remoteThumbnails = emptyMap(),
                 failedRemoteThumbnails = emptySet(),
                 remoteBackStack = emptyList(),
@@ -352,11 +354,20 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun openRemoteEntry(entry: RemoteEntry) {
-        val connection = _uiState.value.remoteConnection ?: return
+        val state = _uiState.value
+        val connection = state.remoteConnection ?: return
         if (entry.isDirectory) {
             loadRemoteDirectory(connection, entry.path, pushCurrentPath = true)
         } else {
-            downloadRemoteFile(connection, entry)
+            val sequence = state.remoteFileSequence.ifEmpty { state.remoteEntries.filterNot { it.isDirectory } }
+            val index = sequence.indexOfFirst { it.path == entry.path }.takeIf { it >= 0 } ?: return
+            downloadRemoteFile(
+                connection = connection,
+                entry = entry,
+                sequence = sequence,
+                index = index,
+                showFullScreenLoading = true
+            )
         }
     }
 
@@ -403,6 +414,8 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
                     remoteConnection = connection,
                     remoteTitle = title,
                     remotePath = path,
+                    remoteFileSequence = emptyList(),
+                    remoteFileIndex = -1,
                     remoteThumbnails = emptyMap(),
                     failedRemoteThumbnails = emptySet(),
                     isRemoteBusy = true,
@@ -422,6 +435,8 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
                             screenState = ScreenState.Remote,
                             homeTab = OpenRecordKind.Network,
                             remoteEntries = entries,
+                            remoteFileSequence = entries.filterNot { entry -> entry.isDirectory },
+                            remoteFileIndex = -1,
                             remotePath = path,
                             remoteBackStack = nextBackStack,
                             remoteThumbnails = emptyMap(),
@@ -444,25 +459,55 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    private fun downloadRemoteFile(connection: RemoteConnection, entry: RemoteEntry) {
+    private fun downloadRemoteFile(
+        connection: RemoteConnection,
+        entry: RemoteEntry,
+        sequence: List<RemoteEntry>,
+        index: Int,
+        showFullScreenLoading: Boolean
+    ) {
         loadJob?.cancel()
         remoteThumbnailJob?.cancel()
         loadJob = viewModelScope.launch {
             _uiState.update {
-                it.copy(isRemoteBusy = true, errorMessage = null, loadingMessage = "Downloading ${entry.name}")
+                if (showFullScreenLoading) {
+                    it.copy(isRemoteBusy = true, errorMessage = null, loadingMessage = "Downloading ${entry.name}")
+                } else {
+                    it.copy(isSwitchingFile = true, errorMessage = null, loadingMessage = "Downloading ${entry.name}")
+                }
             }
             runCatching { sftpRepository.download(connection, entry, networkCacheLimitBytes()) }
                 .onSuccess { download ->
-                    _uiState.update { it.copy(isRemoteBusy = false) }
-                    openLoadedUriFromSequence(download.uri, listOf(download.uri), 0, showFullScreenLoading = true)
+                    _uiState.update {
+                        it.copy(
+                            remoteFileSequence = sequence,
+                            isRemoteBusy = false
+                        )
+                    }
+                    openLoadedUriFromSequence(
+                        uri = download.uri,
+                        sequence = listOf(download.uri),
+                        index = 0,
+                        showFullScreenLoading = showFullScreenLoading,
+                        remoteIndex = index
+                    )
                 }
                 .onFailure { error ->
                     _uiState.update {
-                        it.copy(
-                            screenState = ScreenState.Remote,
-                            isRemoteBusy = false,
-                            errorMessage = error.message ?: "Failed to download remote file"
-                        )
+                        if (showFullScreenLoading) {
+                            it.copy(
+                                screenState = ScreenState.Remote,
+                                remoteFileSequence = sequence,
+                                remoteFileIndex = -1,
+                                isRemoteBusy = false,
+                                errorMessage = error.message ?: "Failed to download remote file"
+                            )
+                        } else {
+                            it.copy(
+                                isSwitchingFile = false,
+                                errorMessage = error.message ?: "Failed to download remote file"
+                            )
+                        }
                     }
                 }
         }
@@ -568,7 +613,8 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
         uri: Uri,
         sequence: List<Uri>,
         index: Int,
-        showFullScreenLoading: Boolean
+        showFullScreenLoading: Boolean,
+        remoteIndex: Int? = null
     ) {
         _uiState.update {
             if (showFullScreenLoading) {
@@ -596,6 +642,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
                         currentImage = image,
                         fileSequence = sequence,
                         fileIndex = index,
+                        remoteFileIndex = remoteIndex ?: it.remoteFileIndex,
                         thumbnails = emptyMap(),
                         isHomeVisible = false,
                         isUiVisible = if (showFullScreenLoading) true else it.isUiVisible,
@@ -663,6 +710,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun openNextFile() {
         val state = _uiState.value
+        if (openAdjacentRemoteFile(state, direction = 1)) return
         if (state.fileSequence.size <= 1) return
         val nextIndex = (state.fileIndex + 1).coerceAtMost(state.fileSequence.lastIndex)
         if (nextIndex != state.fileIndex) openUriFromSequence(state.fileSequence[nextIndex], state.fileSequence, nextIndex)
@@ -670,11 +718,29 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun openPreviousFile() {
         val state = _uiState.value
+        if (openAdjacentRemoteFile(state, direction = -1)) return
         if (state.fileSequence.size <= 1) return
         val previousIndex = (state.fileIndex - 1).coerceAtLeast(0)
         if (previousIndex != state.fileIndex) {
             openUriFromSequence(state.fileSequence[previousIndex], state.fileSequence, previousIndex)
         }
+    }
+
+    private fun openAdjacentRemoteFile(state: ViewerUiState, direction: Int): Boolean {
+        val connection = state.remoteConnection ?: return false
+        val sequence = state.remoteFileSequence
+        if (sequence.isEmpty() || state.remoteFileIndex !in sequence.indices) return false
+        if (state.isSwitchingFile || state.isRemoteBusy) return true
+        val targetIndex = (state.remoteFileIndex + direction).coerceIn(sequence.indices)
+        if (targetIndex == state.remoteFileIndex) return true
+        downloadRemoteFile(
+            connection = connection,
+            entry = sequence[targetIndex],
+            sequence = sequence,
+            index = targetIndex,
+            showFullScreenLoading = false
+        )
+        return true
     }
 
     fun toggleChrome() {

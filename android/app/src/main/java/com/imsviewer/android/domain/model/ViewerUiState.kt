@@ -30,6 +30,8 @@ data class ViewerUiState(
     val remoteTitle: String? = null,
     val remotePath: String = "/",
     val remoteEntries: List<RemoteEntry> = emptyList(),
+    val remoteFileSequence: List<RemoteEntry> = emptyList(),
+    val remoteFileIndex: Int = -1,
     val remoteThumbnails: Map<String, Bitmap> = emptyMap(),
     val failedRemoteThumbnails: Set<String> = emptySet(),
     val remoteBackStack: List<String> = emptyList(),

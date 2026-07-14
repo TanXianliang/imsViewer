@@ -55,13 +55,24 @@ class SftpRepository(private val context: Context) {
             require(!entry.isDirectory) { "Remote entry is a directory" }
             val cacheDir = sftpCacheDir()
             cacheDir.mkdirs()
-            val safeName = entry.name.replace(Regex("[^A-Za-z0-9._-]"), "_")
-            val localFile = File(cacheDir, "${System.currentTimeMillis()}_$safeName")
-            withSftp(connection) { sftp ->
-                localFile.outputStream().use { output ->
-                    sftp.get(entry.path, output)
+            val localFile = File(cacheDir, downloadCacheFileName(connection, entry))
+            if (!isReusableDownload(localFile, entry)) {
+                val temporaryFile = File.createTempFile("remote_download_", ".tmp", cacheDir)
+                try {
+                    withSftp(connection) { sftp ->
+                        temporaryFile.outputStream().use { output ->
+                            sftp.get(entry.path, output)
+                        }
+                    }
+                    localFile.delete()
+                    if (!temporaryFile.renameTo(localFile)) {
+                        temporaryFile.copyTo(localFile, overwrite = true)
+                    }
+                } finally {
+                    temporaryFile.delete()
                 }
             }
+            localFile.setLastModified(System.currentTimeMillis())
             trimCache(maxCacheBytes, keepFile = localFile)
             RemoteDownload(
                 uri = Uri.fromFile(localFile),
@@ -107,9 +118,11 @@ class SftpRepository(private val context: Context) {
         var totalBytes = keepFile.length()
         files.forEach { file ->
             if (file.absolutePath == keepFile.absolutePath) return@forEach
-            totalBytes += file.length()
-            if (totalBytes > maxCacheBytes) {
+            val fileBytes = file.length()
+            if (totalBytes + fileBytes > maxCacheBytes) {
                 file.delete()
+            } else {
+                totalBytes += fileBytes
             }
         }
     }
@@ -125,11 +138,27 @@ class SftpRepository(private val context: Context) {
     }
 
     private fun thumbnailFileName(connection: RemoteConnection, entry: RemoteEntry): String {
+        return "${remoteEntryCacheKey(connection, entry)}.jpg"
+    }
+
+    private fun downloadCacheFileName(connection: RemoteConnection, entry: RemoteEntry): String {
+        val safeName = entry.name
+            .replace(Regex("[^A-Za-z0-9._-]"), "_")
+            .takeLast(MaxCachedFileNameLength)
+            .ifBlank { "remote_file" }
+        return "${remoteEntryCacheKey(connection, entry)}_$safeName"
+    }
+
+    private fun remoteEntryCacheKey(connection: RemoteConnection, entry: RemoteEntry): String {
         val key = "${connection.username}@${connection.host}:${connection.port}:${entry.path}:${entry.sizeBytes}:${entry.modifiedTimeSeconds}"
-        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        return java.security.MessageDigest.getInstance("SHA-256")
             .digest(key.toByteArray(Charsets.UTF_8))
             .joinToString("") { "%02x".format(it) }
-        return "$digest.jpg"
+    }
+
+    private fun isReusableDownload(file: File, entry: RemoteEntry): Boolean {
+        if (!file.isFile || file.length() <= 0L) return false
+        return entry.sizeBytes <= 0L || file.length() == entry.sizeBytes
     }
 
     private fun fetchAndCacheThumbnail(
@@ -228,5 +257,6 @@ class SftpRepository(private val context: Context) {
         const val ConnectTimeoutMs = 15_000
         const val MaxRemoteThumbnailSourceBytes = 20L * 1024L * 1024L
         const val ThumbnailJpegQuality = 82
+        const val MaxCachedFileNameLength = 96
     }
 }

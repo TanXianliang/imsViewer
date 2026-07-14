@@ -166,6 +166,7 @@ fun MainScreen(
             ScreenState.Ready -> {
                 val image = state.currentImage
                 if (image != null) {
+                    val hasRemoteSequence = state.remoteConnection != null && state.remoteFileSequence.isNotEmpty()
                     BackHandler(
                         onBack = if (state.folderSequence.isNotEmpty()) {
                             viewModel::showFolder
@@ -179,8 +180,12 @@ fun MainScreen(
                         image = image,
                         isUiVisible = state.isUiVisible,
                         isSwitchingFile = state.isSwitchingFile,
-                        fileIndex = state.fileIndex,
-                        fileCount = state.fileSequence.size.coerceAtLeast(1),
+                        fileIndex = if (hasRemoteSequence) state.remoteFileIndex.coerceAtLeast(0) else state.fileIndex,
+                        fileCount = if (hasRemoteSequence) {
+                            state.remoteFileSequence.size
+                        } else {
+                            state.fileSequence.size.coerceAtLeast(1)
+                        },
                         thumbnails = state.thumbnails,
                         onToggleChrome = viewModel::toggleChrome,
                         onHome = when {
