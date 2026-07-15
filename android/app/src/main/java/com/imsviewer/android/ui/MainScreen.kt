@@ -72,6 +72,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -100,6 +101,7 @@ import com.imsviewer.android.domain.model.ScreenState
 import com.imsviewer.android.domain.model.ViewerImage
 import com.imsviewer.android.util.SizeFormatter
 import com.imsviewer.android.viewmodel.ViewerViewModel
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -143,7 +145,8 @@ fun MainScreen(
                     isBusy = state.isRemoteBusy,
                     onBack = viewModel::navigateRemoteBack,
                     onHome = viewModel::showHome,
-                    onOpenEntry = viewModel::openRemoteEntry
+                    onOpenEntry = viewModel::openRemoteEntry,
+                    onVisibleRangeChanged = viewModel::updateRemoteVisibleRange
                 )
             }
             ScreenState.Folder -> {
@@ -251,8 +254,29 @@ private fun RemoteBrowserScreen(
     isBusy: Boolean,
     onBack: () -> Unit,
     onHome: () -> Unit,
-    onOpenEntry: (RemoteEntry) -> Unit
+    onOpenEntry: (RemoteEntry) -> Unit,
+    onVisibleRangeChanged: (IntRange) -> Unit
 ) {
+    val listState = rememberLazyListState()
+
+    LaunchedEffect(path) {
+        listState.scrollToItem(0)
+    }
+    LaunchedEffect(path, entries, listState) {
+        snapshotFlow {
+            val visibleItems = listState.layoutInfo.visibleItemsInfo
+            if (visibleItems.isEmpty()) {
+                null
+            } else {
+                visibleItems.first().index..visibleItems.last().index
+            }
+        }
+            .distinctUntilChanged()
+            .collect { visibleRange ->
+                if (visibleRange != null) onVisibleRangeChanged(visibleRange)
+            }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -298,6 +322,7 @@ private fun RemoteBrowserScreen(
             }
         } else {
             LazyColumn(
+                state = listState,
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)

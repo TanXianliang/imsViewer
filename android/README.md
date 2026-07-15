@@ -45,6 +45,8 @@ android/app/build/outputs/apk/debug/app-debug.apk
 - 普通图片缩略图：后台拉取并按 SHA-256(path:size:mtime) 缓存到本地 `sftp_thumbnails` 目录；源文件超过 20MB 不生成缩略图。
 - 新 IMS 缩略图：先读取尾部 36B，再按 `IMSTHMB` Trailer 只读取内嵌 160px JPEG 和校验 CRC32。
 - 旧 IMS 缩略图：分段读取尾部索引定位封面，只下载封面数据，不下载整个 IMS。
+- 远程列表只加载可见项及前后各 8 项；可见项优先，快速滚动会取消旧队列。
+- 缩略图使用单 worker，同一批次复用一个 SFTP Session/Channel，避免逐张重新登录。
 - 远程 IMS 文件点击下载到本地缓存后进入浏览；同目录切换复用缓存。
 - 缩略图任务随目录切换 / 返回首页自动取消，避免无谓流量。
 - 可配置网络缓存上限（默认 512MB），缓存超出自动按 LRU 清理。
@@ -52,6 +54,7 @@ android/app/build/outputs/apk/debug/app-debug.apk
 ## 网络缓存
 
 - 缓存目录：`cacheDir/sftp`（远程文件）+ `cacheDir/sftp_thumbnails`（缩略图）。
+- `sftp_thumbnails` 独立限制为 96MB，按最后访问时间执行 LRU 淘汰。
 - 设置页可调整上限（MB），`清除缓存` 一并清空两个目录。
 - 缩略图缓存键包含修改时间，远端文件更新后自动失效重建。
 - App 正常退出时不会主动清空缓存；由容量上限、系统缓存回收或用户手动清理控制。

@@ -808,11 +808,12 @@ imsViewer Android 不应做成完整相册 App。更合适的定位是“本地�
 
 推荐首版 UI 目标：打开即看、图片最大、手势自然、信息可查但不打扰。
 
-## 9. 当前实现状态（2026-07-14）
+## 9. 当前实现状态（2026-07-15）
 
 - 首页已实现 `Open File`、`Open Folder`、`Open Network` 三分页及独立历史记录。
 - SFTP 已支持多个连接、可选加密保存密码、目录浏览、远程文件左右滑切换。
-- Folder 和 Network 目录缩略图均在后台生成；远程 IMS 优先读取内嵌缩略图。
+- Folder 和 Network 目录缩略图均在后台生成；远程列表按可见范围优先加载并前后预取 8 项。
+- 远程缩略图使用单 worker，每批复用一个 SFTP Session/Channel，磁盘缓存独立限制为 96MB LRU。
 - 网络缓存默认上限 512MB，可在设置中修改或手动清空，退出 App 不主动清理。
 - 新 IMS 使用 v2 索引和兼容的 `IMSTHMB` Trailer；Trailer 不代表 v3。
 - Debug 与 Release 构建均已通过，Release artifact 当前未签名。

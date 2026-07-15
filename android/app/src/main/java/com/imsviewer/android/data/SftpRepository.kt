@@ -12,7 +12,12 @@ import com.imsviewer.android.util.u32Le
 import com.jcraft.jsch.ChannelSftp
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.SftpProgressMonitor
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.Locale
@@ -21,6 +26,8 @@ import java.util.Vector
 import java.util.zip.CRC32
 
 class SftpRepository(private val context: Context) {
+    private val thumbnailBatchMutex = Mutex()
+
     suspend fun list(connection: RemoteConnection, path: String = connection.rootPath): List<RemoteEntry> =
         withContext(Dispatchers.IO) {
             withSftp(connection) { sftp ->
@@ -77,7 +84,7 @@ class SftpRepository(private val context: Context) {
                 }
             }
             localFile.setLastModified(System.currentTimeMillis())
-            trimCache(maxCacheBytes, keepFile = localFile)
+            trimDirectoryCache(cacheDir, maxCacheBytes, keepFile = localFile)
             RemoteDownload(
                 uri = Uri.fromFile(localFile),
                 fileName = entry.name,
@@ -87,23 +94,59 @@ class SftpRepository(private val context: Context) {
 
     suspend fun clearCache() = withContext(Dispatchers.IO) {
         clearFiles(sftpCacheDir())
-        clearFiles(sftpThumbnailCacheDir())
+        thumbnailBatchMutex.withLock {
+            clearFiles(sftpThumbnailCacheDir())
+        }
     }
 
-    suspend fun makeThumbnail(connection: RemoteConnection, entry: RemoteEntry, targetMaxSize: Int): Bitmap =
+    suspend fun makeThumbnails(
+        connection: RemoteConnection,
+        entries: List<RemoteEntry>,
+        targetMaxSize: Int,
+        onResult: (RemoteEntry, Result<Bitmap>) -> Unit
+    ) =
         withContext(Dispatchers.IO) {
-            require(canMakeThumbnail(entry)) { "Remote thumbnail is not supported" }
-            val cacheDir = sftpThumbnailCacheDir()
-            cacheDir.mkdirs()
-            val localFile = File(cacheDir, thumbnailFileName(connection, entry))
-            if (localFile.exists() && localFile.length() > 0L) {
-                return@withContext runCatching { decodeThumbnail(localFile, targetMaxSize) }
-                    .getOrElse {
-                        localFile.delete()
-                        fetchAndCacheThumbnail(connection, entry, localFile, targetMaxSize)
+            thumbnailBatchMutex.withLock {
+                val batchContext = currentCoroutineContext()
+                val cacheDir = sftpThumbnailCacheDir()
+                cacheDir.mkdirs()
+                trimDirectoryCache(cacheDir, ThumbnailCacheLimitBytes, keepFile = null)
+
+                val pendingEntries = mutableListOf<Pair<RemoteEntry, File>>()
+                entries.forEach { entry ->
+                    batchContext.ensureActive()
+                    require(canMakeThumbnail(entry)) { "Remote thumbnail is not supported" }
+                    val localFile = File(cacheDir, thumbnailFileName(connection, entry))
+                    val cachedBitmap = loadCachedThumbnail(localFile, targetMaxSize)
+                    if (cachedBitmap != null) {
+                        onResult(entry, Result.success(cachedBitmap))
+                    } else {
+                        pendingEntries += entry to localFile
                     }
+                }
+                if (pendingEntries.isEmpty()) return@withLock
+
+                var processedCount = 0
+                try {
+                    withSftp(connection) { sftp ->
+                        pendingEntries.forEach { (entry, localFile) ->
+                            batchContext.ensureActive()
+                            val result = runCatching {
+                                fetchAndCacheThumbnail(sftp, entry, localFile, targetMaxSize)
+                            }
+                            batchContext.ensureActive()
+                            onResult(entry, result)
+                            processedCount += 1
+                        }
+                    }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    pendingEntries.drop(processedCount).forEach { (entry, _) ->
+                        onResult(entry, Result.failure(error))
+                    }
+                }
             }
-            fetchAndCacheThumbnail(connection, entry, localFile, targetMaxSize)
         }
 
     fun canMakeThumbnail(entry: RemoteEntry): Boolean {
@@ -115,16 +158,26 @@ class SftpRepository(private val context: Context) {
         }
     }
 
-    private fun trimCache(maxCacheBytes: Long, keepFile: File) {
+    private fun loadCachedThumbnail(file: File, targetMaxSize: Int): Bitmap? {
+        if (!file.isFile || file.length() <= 0L) return null
+        return runCatching { decodeThumbnail(file, targetMaxSize) }
+            .onSuccess { file.setLastModified(System.currentTimeMillis()) }
+            .getOrElse {
+                file.delete()
+                null
+            }
+    }
+
+    private fun trimDirectoryCache(directory: File, maxCacheBytes: Long, keepFile: File?) {
         if (maxCacheBytes <= 0L) return
-        val files = sftpCacheDir()
+        val files = directory
             .listFiles()
             .orEmpty()
             .filter { it.isFile }
             .sortedByDescending { it.lastModified() }
-        var totalBytes = keepFile.length()
+        var totalBytes = keepFile?.takeIf { it.isFile }?.length() ?: 0L
         files.forEach { file ->
-            if (file.absolutePath == keepFile.absolutePath) return@forEach
+            if (file.absolutePath == keepFile?.absolutePath) return@forEach
             val fileBytes = file.length()
             if (totalBytes + fileBytes > maxCacheBytes) {
                 file.delete()
@@ -169,20 +222,18 @@ class SftpRepository(private val context: Context) {
     }
 
     private fun fetchAndCacheThumbnail(
-        connection: RemoteConnection,
+        sftp: ChannelSftp,
         entry: RemoteEntry,
         thumbnailFile: File,
         targetMaxSize: Int
     ): Bitmap {
         val bitmap = if (isImsFile(entry.name)) {
-            val sourceBytes = withSftp(connection) { sftp -> readImsThumbnail(sftp, entry) }
+            val sourceBytes = readImsThumbnail(sftp, entry)
             decodeThumbnail(sourceBytes, targetMaxSize)
         } else {
             val sourceFile = File.createTempFile("remote_thumb_", ".tmp", sftpThumbnailCacheDir())
             try {
-                withSftp(connection) { sftp ->
-                    sourceFile.outputStream().use { output -> sftp.get(entry.path, output) }
-                }
+                sourceFile.outputStream().use { output -> sftp.get(entry.path, output) }
                 decodeThumbnail(sourceFile, targetMaxSize)
             } finally {
                 sourceFile.delete()
@@ -193,6 +244,8 @@ class SftpRepository(private val context: Context) {
                 "Cannot encode remote thumbnail"
             }
         }
+        thumbnailFile.setLastModified(System.currentTimeMillis())
+        trimDirectoryCache(sftpThumbnailCacheDir(), ThumbnailCacheLimitBytes, keepFile = thumbnailFile)
         return bitmap
     }
 
@@ -413,6 +466,7 @@ class SftpRepository(private val context: Context) {
     private companion object {
         const val ConnectTimeoutMs = 15_000
         const val MaxRemoteThumbnailSourceBytes = 20L * 1024L * 1024L
+        const val ThumbnailCacheLimitBytes = 96L * 1024L * 1024L
         const val MaxEmbeddedThumbnailBytes = 1024L * 1024L
         const val MaxRemoteImsIndexBytes = 8L * 1024L * 1024L
         const val ThumbnailJpegQuality = 82
