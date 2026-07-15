@@ -1,6 +1,6 @@
 {
   "name": "imsviewer",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "IMS Image Viewer - 图片浏览器",
   "type": "module",
   "scripts": {

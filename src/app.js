@@ -125,8 +125,10 @@ async function loadCurrentImage() {
         index: state.currentSubIdx,
       });
       state.subImages[state.currentSubIdx] = sub;
+      updateThumbnailImage(state.currentSubIdx, sub);
     } catch (err) {
       console.error('加载子图失败:', err);
+      markThumbnailLoadFailed(state.currentSubIdx);
       return;
     }
   }
@@ -264,6 +266,41 @@ function createThumbItem(sub, index) {
   });
 
   return div;
+}
+
+function updateThumbnailImage(index, sub) {
+  const thumbEl = dom.thumbnailList.querySelector(`.thumb-item[data-index="${index}"]`);
+  const placeholder = thumbEl?.querySelector('.thumb-loading, .thumb-error');
+  if (!placeholder || !sub.bytes_base64) return;
+
+  const mime = formatMime(sub.format);
+  const rawBytes = base64ToBytes(sub.bytes_base64);
+  const url = URL.createObjectURL(new Blob([rawBytes], { type: mime }));
+  const img = document.createElement('img');
+  img.src = url;
+  img.alt = sub.filename;
+  img.onload = () => URL.revokeObjectURL(url);
+  img.onerror = () => {
+    URL.revokeObjectURL(url);
+    const failed = document.createElement('div');
+    failed.className = 'thumb-error';
+    failed.title = '缩略图加载失败，点击重试';
+    failed.textContent = '!';
+    img.replaceWith(failed);
+  };
+  placeholder.replaceWith(img);
+}
+
+function markThumbnailLoadFailed(index) {
+  const thumbEl = dom.thumbnailList.querySelector(`.thumb-item[data-index="${index}"]`);
+  const placeholder = thumbEl?.querySelector('.thumb-loading');
+  if (!placeholder) return;
+
+  const failed = document.createElement('div');
+  failed.className = 'thumb-error';
+  failed.title = '缩略图加载失败，点击重试';
+  failed.textContent = '!';
+  placeholder.replaceWith(failed);
 }
 
 // ===== 缩略图拖拽 + 编辑模式点击（绑定在 thumbnail-list 上委托） =====
@@ -1725,42 +1762,34 @@ function startBackgroundPreload() {
   const cancelToken = {};
   state.preloadCancel = cancelToken;
 
-  (async () => {
-    for (let i = 0; i < state.subImages.length; i++) {
-      // 检查是否被取消
-      if (state.preloadCancel !== cancelToken) return;
+  const pending = state.subImages
+    .map((sub, index) => (sub.bytes_base64 ? -1 : index))
+    .filter(index => index >= 0);
+  let next = 0;
 
-      const sub = state.subImages[i];
-      // 跳过已加载的（封面和已缓存的）
-      if (sub.bytes_base64) continue;
+  const worker = async () => {
+    while (state.preloadCancel === cancelToken && next < pending.length) {
+      const index = pending[next++];
+      if (state.subImages[index].bytes_base64) continue;
 
       try {
-        const loaded = await invoke('get_sub_image', { path: filepath, index: i });
+        const loaded = await invoke('get_sub_image', { path: filepath, index });
         if (state.preloadCancel !== cancelToken) return;
 
-        // 缓存到 state
-        state.subImages[i] = loaded;
-
-        // 更新缩略图
-        const thumbEl = document.querySelector(`#thumbnail-list .thumb-item[data-index="${i}"]`);
-        if (thumbEl) {
-          const mime = formatMime(loaded.format);
-          const rawBytes = base64ToBytes(loaded.bytes_base64);
-          const blob = new Blob([rawBytes], { type: mime });
-          const url = URL.createObjectURL(blob);
-          const loadingDiv = thumbEl.querySelector('.thumb-loading');
-          if (loadingDiv) {
-            const img = document.createElement('img');
-            img.src = url;
-            img.alt = loaded.filename;
-            loadingDiv.replaceWith(img);
-          }
-        }
+        state.subImages[index] = loaded;
+        updateThumbnailImage(index, loaded);
       } catch (e) {
-        console.error('预加载子图失败:', i, e);
+        if (state.preloadCancel !== cancelToken) return;
+        console.error('预加载子图失败:', index, e);
+        markThumbnailLoadFailed(index);
       }
     }
-  })();
+  };
+
+  const workerCount = Math.min(3, pending.length);
+  for (let i = 0; i < workerCount; i++) {
+    void worker();
+  }
 }
 
 // ===== 启动 =====

@@ -249,6 +249,16 @@ body {
   background-size: 200% 100%;
   animation: thumb-shimmer 1.5s infinite;
 }
+.thumb-error {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  color: #e57373;
+  font-size: 18px;
+  font-weight: bold;
+  background: var(--bg-tertiary);
+}
 @keyframes thumb-shimmer {
   0% { background-position: 200% 0; }
   100% { background-position: -200% 0; }

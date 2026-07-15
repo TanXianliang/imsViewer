@@ -416,8 +416,8 @@ npm run tauri build
 
 ```
 src-tauri/target/release/bundle/
-├── msi/imsViewer_1.0.0_x64.msi    # Windows 安装包
-├── nsis/imsViewer_1.0.0_x64.exe   # NSIS 安装程序
+├── msi/imsViewer_1.1.0_x64.msi    # Windows 安装包
+├── nsis/imsViewer_1.1.0_x64.exe   # NSIS 安装程序
 └── imsViewer.exe                   # 独立可执行文件 (~10MB)
 ```
 

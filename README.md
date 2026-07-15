@@ -54,7 +54,7 @@ IMS 图片浏览器 — 基于 Tauri v2 的三栏图片浏览与批量转换工�
 
 ## 安装
 
-从项目 Releases 页面下载 `imsViewer_1.0.0_x64-setup.exe` 安装，或直接下载 `imsViewer.exe` 免安装运行。
+从项目 Releases 页面下载 `imsViewer_1.1.0_x64-setup.exe` 安装，或直接下载 `imsViewer.exe` 免安装运行。
 
 > 需要 Windows 10+ (内置 WebView2)。
 
