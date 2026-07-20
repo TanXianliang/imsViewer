@@ -15,6 +15,7 @@ use std::sync::Mutex;
 use std::time::SystemTime;
 use tauri::Emitter;
 
+mod dedup;
 mod ims;
 mod ims_pack;
 
@@ -410,10 +411,18 @@ async fn pick_file(app: tauri::AppHandle) -> Result<Option<String>, String> {
         .file()
         .add_filter(
             "图片文件",
-            &["jpg", "jpeg", "png", "ims", "ims.jpg", "ims.png"],
+            &[
+                "jpg", "jpeg", "png", "webp", "avif", "ims", "ims.jpg", "ims.jpeg", "ims.png",
+                "ims.webp", "ims.avif",
+            ],
         )
-        .add_filter("IMS 文件", &["ims", "ims.jpg", "ims.png"])
-        .add_filter("普通图片", &["jpg", "jpeg", "png"])
+        .add_filter(
+            "IMS 文件",
+            &[
+                "ims", "ims.jpg", "ims.jpeg", "ims.png", "ims.webp", "ims.avif",
+            ],
+        )
+        .add_filter("普通图片", &["jpg", "jpeg", "png", "webp", "avif"])
         .add_filter("所有文件", &["*"])
         .blocking_pick_file();
 
@@ -1551,6 +1560,7 @@ pub fn run(launch_file: Option<String>) {
         .manage(LaunchFile(launch_file))
         .manage(ImsCache(Mutex::new(HashMap::new())))
         .manage(FolderScanState::new())
+        .manage(dedup::DedupService::new())
         .invoke_handler(tauri::generate_handler![
             open_file,
             save_ims,
@@ -1566,6 +1576,18 @@ pub fn run(launch_file: Option<String>) {
             register_file_associations,
             get_launch_file,
             refresh_folder,
+            dedup::dedup_get_model_status,
+            dedup::dedup_get_index_status,
+            dedup::dedup_list_indexes,
+            dedup::dedup_update_index,
+            dedup::dedup_rebuild_index,
+            dedup::dedup_search,
+            dedup::dedup_cancel_job,
+            dedup::dedup_get_result_thumbnail,
+            dedup::dedup_verify_result,
+            dedup::dedup_delete_index,
+            dedup::dedup_delete_all_indexes,
+            dedup::dedup_reveal_file,
         ])
         .run(tauri::generate_context!())
         .expect("启动 imsViewer 失败");

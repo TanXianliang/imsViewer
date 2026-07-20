@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "tauri": "tauri"
+    "tauri": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_with_libclang.ps1 npm exec tauri --"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0",

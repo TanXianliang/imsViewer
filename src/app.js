@@ -6,6 +6,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { listen } from '@tauri-apps/api/event';
+import { setupDedupTool } from './dedup.js';
 
 // ===== State =====
 const state = {
@@ -69,6 +70,7 @@ function init() {
   setupThumbDrag();
   setupFolderBar();
   setupWindowControls();
+  setupDedupTool({ openFile });
 
   window.addEventListener('resize', () => {
     setupCanvasSize();
@@ -861,8 +863,31 @@ async function setupWindowControls() {
 
 // ===== 菜单栏 =====
 function setupMenuActions() {
+  $$('.menu-item').forEach(item => {
+    item.tabIndex = 0;
+    const toggleMenu = () => {
+      const shouldOpen = !item.classList.contains('open');
+      $$('.menu-item.open').forEach(openItem => openItem.classList.remove('open'));
+      if (shouldOpen) item.classList.add('open');
+    };
+    item.addEventListener('click', event => {
+      if (event.target.closest('.menu-action')) return;
+      toggleMenu();
+    });
+    item.addEventListener('keydown', event => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      toggleMenu();
+    });
+  });
+  document.addEventListener('click', event => {
+    if (event.target.closest('.menu-item')) return;
+    $$('.menu-item.open').forEach(item => item.classList.remove('open'));
+  });
+
   $$('.menu-action').forEach(el => {
     el.addEventListener('click', async () => {
+      $$('.menu-item.open').forEach(item => item.classList.remove('open'));
       const action = el.dataset.action;
       console.log('菜单操作:', action);
       switch (action) {
@@ -900,6 +925,9 @@ function setupMenuActions() {
           break;
         case 'batch-upgrade':
           openUpgradeModal();
+          break;
+        case 'image-dedup':
+          window.dispatchEvent(new CustomEvent('imsviewer:open-dedup'));
           break;
         case 'register-assoc':
           registerAssociations();

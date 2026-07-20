@@ -1,0 +1,14 @@
+{
+  "model_id": "sscd_disc_mixup",
+  "model_version": 1,
+  "embedding_dim": 512,
+  "input_width": 320,
+  "input_height": 320,
+  "preprocess_version": 1,
+  "onnx_sha256": "0ceb38718604ebbe66bde5a6226e796d4bf655f9693165463b99d41d2ce9057b",
+  "torchscript_sha256": "9f26bd4c848cc19b73d2ae92eea6e04886f61a7b764ceb7a13aeee62e6a6db56",
+  "parity_cosine": 1.0000001192092896,
+  "max_abs_error": 3.4458935260772705e-06,
+  "torchscript_cpu_ms": 329.69929999671876,
+  "onnx_cpu_ms": 24.792699958197773
+}

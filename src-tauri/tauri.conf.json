@@ -27,6 +27,12 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": [
+      "resources/models/sscd_disc_mixup.onnx",
+      "resources/models/sscd_disc_mixup.json",
+      "resources/models/text-detection.rten",
+      "resources/models/text-recognition.rten"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

@@ -52,6 +52,8 @@
             <div class="menu-action" data-action="batch-convert">批量转换...</div>
             <div class="menu-action" data-action="batch-upgrade">批量升级 IMS 版本...</div>
             <div class="menu-separator"></div>
+            <div class="menu-action" data-action="image-dedup">图片查重...</div>
+            <div class="menu-separator"></div>
             <div class="menu-action" data-action="register-assoc">添加到右键菜单</div>
           </div>
         </div>
@@ -131,6 +133,97 @@
       </div>
     </div>
 
+    <div id="dedup-workspace" style="display:none">
+      <div class="dedup-toolbar">
+        <button id="dedup-back" class="btn-secondary">← 返回图片浏览器</button>
+        <div class="dedup-title">
+          <strong>图片查重</strong>
+          <span id="dedup-model-status">正在检查 SSCD 模型...</span>
+        </div>
+        <button id="dedup-manage-indexes" class="btn-secondary">索引管理</button>
+      </div>
+
+      <div class="dedup-settings">
+        <div class="dedup-field dedup-field-wide">
+          <label for="dedup-source-path">源图片</label>
+          <input id="dedup-source-path" class="path-input" type="text" readonly placeholder="选择 JPEG、PNG、WebP、AVIF 或 IMS 文件" />
+          <button id="dedup-pick-source" class="btn-browse">选择图片</button>
+        </div>
+        <div class="dedup-field dedup-field-wide">
+          <label for="dedup-gallery-path">目标图库</label>
+          <input id="dedup-gallery-path" class="path-input" type="text" readonly placeholder="选择要建立索引并查重的文件夹" />
+          <button id="dedup-pick-gallery" class="btn-browse">选择文件夹</button>
+        </div>
+        <div class="dedup-options-row">
+          <label><input id="dedup-recursive" type="checkbox" checked /> 包含子目录</label>
+          <label>扫描深度 <input id="dedup-max-depth" class="depth-input" type="number" min="0" max="100" value="0" title="0=无限深度" /></label>
+          <label><input id="dedup-multi-threaded" type="checkbox" checked /> 多线程处理</label>
+          <label>线程数 <input id="dedup-worker-count" class="depth-input" type="number" min="1" max="64" placeholder="自动" /></label>
+          <label>查重强度
+            <select id="dedup-profile">
+              <option value="0.85">严格</option>
+              <option value="0.75" selected>标准</option>
+              <option value="0.65">宽松</option>
+              <option value="custom">自定义</option>
+            </select>
+          </label>
+          <label id="dedup-custom-threshold-wrap" style="display:none">SSCD 阈值
+            <input id="dedup-threshold" class="depth-input" type="number" min="0" max="1" step="0.01" value="0.75" />
+          </label>
+        </div>
+        <div class="dedup-actions">
+          <button id="dedup-start" class="btn-primary">开始查重</button>
+          <button id="dedup-update" class="btn-secondary">仅更新索引</button>
+          <button id="dedup-cancel" class="btn-secondary" disabled>取消任务</button>
+          <span id="dedup-index-status">尚未选择图库</span>
+        </div>
+      </div>
+
+      <div id="dedup-progress" class="dedup-progress" style="display:none">
+        <div class="progress-bar-container"><div id="dedup-progress-fill" class="progress-bar-fill"></div></div>
+        <div id="dedup-progress-text" class="progress-text">准备就绪</div>
+      </div>
+
+      <div class="dedup-results-header">
+        <strong id="dedup-result-count">查找结果：0</strong>
+        <label>筛选
+          <select id="dedup-result-filter">
+            <option value="all">全部</option>
+            <option value="exact">完全相同</option>
+            <option value="similar">近似图片</option>
+            <option value="review">待复核</option>
+          </select>
+        </label>
+        <label>排序
+          <select id="dedup-result-sort">
+            <option value="similarity">相似度降序</option>
+            <option value="filename">文件名</option>
+            <option value="modified">修改时间（新到旧）</option>
+            <option value="path">完整路径</option>
+          </select>
+        </label>
+        <span class="dedup-result-hint">双击结果可在 imsViewer 中打开</span>
+      </div>
+
+      <div class="dedup-results-wrap">
+        <table class="dedup-results-table">
+          <thead>
+            <tr>
+              <th>预览</th><th>相似度</th><th>类型</th><th>文件名</th><th>来源</th><th>格式</th><th>分辨率</th><th>修改时间</th><th>路径</th><th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="dedup-results-body">
+            <tr class="dedup-empty-row"><td colspan="10">请选择源图片和目标图库后开始查重</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="dedup-pagination">
+        <button id="dedup-prev-page" class="btn-secondary" disabled>上一页</button>
+        <span id="dedup-page-label">第 1 / 1 页</span>
+        <button id="dedup-next-page" class="btn-secondary" disabled>下一页</button>
+      </div>
+    </div>
+
     <!-- 状态栏 -->
     <div id="status-bar">
       <span id="status-file-pos">未打开文件</span>
@@ -138,6 +231,28 @@
       <span id="status-sub-pos">--</span>
       <span class="status-sep">|</span>
       <span id="status-zoom">100%</span>
+    </div>
+  </div>
+
+  <div id="dedup-index-modal" class="modal-overlay" style="display:none">
+    <div class="modal-container dedup-index-modal-container">
+      <div class="modal-header">
+        <span>图片查重索引管理</span>
+        <button class="btn-modal-close" id="dedup-index-close">&times;</button>
+      </div>
+      <div class="modal-body dedup-index-modal-body">
+        <div class="dedup-index-summary">
+          <span>索引保存在 imsViewer 应用数据目录，删除索引不会删除任何原始图片。</span>
+          <button id="dedup-delete-all-indexes" class="btn-danger">删除全部索引</button>
+        </div>
+        <div class="dedup-index-list-wrap">
+          <table class="dedup-results-table">
+            <thead><tr><th>图库路径</th><th>图片数</th><th>占用空间</th><th>更新时间</th><th>状态</th><th>操作</th></tr></thead>
+            <tbody id="dedup-index-list"><tr class="dedup-empty-row"><td colspan="6">正在加载...</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="modal-footer"><button id="dedup-index-close-footer" class="btn-secondary">关闭</button></div>
     </div>
   </div>
 

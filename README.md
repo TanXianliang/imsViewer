@@ -45,6 +45,16 @@ IMS 图片浏览器 — 基于 Tauri v2 的三栏图片浏览与批量转换工�
 - 实时进度条
 - 新生成的桌面端 IMS 使用 v2 索引，并内嵌远程目录缩略图
 
+### 图片查重（Windows 桌面端）
+- 从一张源图片查找目标图库中所有达到相似度阈值的重复或近似图片
+- 支持 JPEG/JPG、PNG、WebP、AVIF 和 IMS；IMS 只检查封面
+- 使用 SHA-256、64 位 pHash 和 SSCD 512 维向量识别原图、重编码、缩放和裁剪等同源图片
+- 图库索引持久保存在 imsViewer 应用数据目录，支持多线程增量更新、清理已不存在文件和空间统计
+- 支持增量更新、重新建立、删除单套或删除全部索引，不修改任何原始图片
+- 结果缩略图只在滚动到可见区域时后台加载，不预生成普通图片缩略图，也不写入图库索引
+- 支持结果筛选、排序、分页、局部特征/OCR 复核、在 imsViewer 打开和资源管理器定位
+- 该子工具不提供 Android 版本
+
 ### Android
 
 - SAF 本地文件/目录浏览，支持 IMS/JPEG/PNG/WebP/AVIF
@@ -76,6 +86,7 @@ IMS 图片浏览器 — 基于 Tauri v2 的三栏图片浏览与批量转换工�
 | 导出全部 | `Ctrl+Shift+E` |
 | 批量转换 | 菜单 工具 → 批量转换 |
 | 批量升级 | 菜单 工具 → 批量升级 IMS |
+| 图片查重 | 菜单 工具 → 图片查重 |
 | 右键集成 | 菜单 工具 → 注册右键菜单 |
 
 ### 编辑模式
@@ -114,6 +125,14 @@ IMS 图片浏览器 — 基于 Tauri v2 的三栏图片浏览与批量转换工�
 2. 选择包含 IMS 文件的目录，设置遍历深度（0=无限）
 3. 可选多线程加速
 4. 点击 **开始升级** — 将旧版 IMS 文件就地升级到 v2（追加 SHA-256 哈希），并为缺少 Trailer 的 v2 文件补写内嵌缩略图
+
+### 图片查重
+
+1. 打开 **工具 → 图片查重**
+2. 选择源图片和目标图库，按需设置递归深度、多线程和线程数
+3. 选择严格、标准、宽松或自定义 SSCD 阈值，点击 **开始查重**
+4. 工具先增量更新图库索引，再返回全部达标结果；结果缩略图在后台按可见区域加载
+5. 使用 **索引管理** 更新、重新建立或删除已有索引；删除索引不会删除图库文件
 
 ### CLI 工具 (Python)
 
@@ -172,6 +191,7 @@ IMS (Image Set) 是一种轻量图片容器格式，将封面图 + 多张子图�
 # - Rust 1.70+
 # - Node.js 18+
 # - Windows 10+ (WebView2)
+# - Visual Studio C++ 工具与 C++ Clang 工具组件（用于构建静态 AVIF 解码依赖）
 
 # 安装依赖
 npm install
@@ -181,12 +201,14 @@ npm run tauri dev
 
 # Windows 发布构建
 .\buildrelease.bat
-# → bin/win32/imsViewer.exe
+# → bin/win32/（imsViewer.exe、运行库和模型资源）
 
 # Android Release artifact
 .\buildrelease_apk.bat
 # → bin/android/imsViewer-android-release.apk（当前未签名）
 ```
+
+`npm run tauri ...` 会通过 `scripts/run_with_libclang.ps1` 自动查找 Visual Studio 或 LLVM 安装中的 `libclang.dll`；发布后的程序运行时不依赖 LLVM。
 
 ## 技术栈
 
