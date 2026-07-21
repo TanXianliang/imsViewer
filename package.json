@@ -1,11 +1,12 @@
 {
   "name": "imsviewer",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "IMS Image Viewer - 图片浏览器",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "check:dedup-ui": "node scripts/check_dedup_batch_ui.mjs",
     "tauri": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_with_libclang.ps1 npm exec tauri --"
   },
   "devDependencies": {

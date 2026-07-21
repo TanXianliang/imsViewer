@@ -48,6 +48,12 @@ pub struct IndexRecord {
     pub error_message: Option<String>,
 }
 
+pub struct IndexSnapshot {
+    pub revision: String,
+    pub records: Vec<IndexRecord>,
+    pub vectors: Mmap,
+}
+
 struct WorkItem {
     source: SourceItem,
     id: i64,
@@ -132,11 +138,12 @@ where
         return Err("索引更新已取消".to_string());
     }
 
-    let (mut existing, old_vectors, old_model_version, old_preprocess_version) = if force_rebuild {
-        (HashMap::new(), None, None, None)
-    } else {
-        load_existing(&paths)?
-    };
+    let (mut existing, old_vectors, old_model_version, old_preprocess_version, old_revision) =
+        if force_rebuild {
+            (HashMap::new(), None, None, None, None)
+        } else {
+            load_existing(&paths)?
+        };
     let can_reuse_model = old_model_version == Some(MODEL_VERSION)
         && old_preprocess_version == Some(PREPROCESS_VERSION);
     let mut next_id = existing.values().map(|record| record.id).max().unwrap_or(0) + 1;
@@ -302,6 +309,7 @@ where
     let updated_ms = now_ms();
     write_meta(&transaction, "schema_version", &SCHEMA_VERSION.to_string())?;
     write_meta(&transaction, "root_path", &root.to_string_lossy())?;
+    write_meta(&transaction, "max_depth", &config.max_depth.to_string())?;
     write_meta(&transaction, "model_version", &MODEL_VERSION.to_string())?;
     write_meta(
         &transaction,
@@ -310,6 +318,19 @@ where
     )?;
     write_meta(&transaction, "last_updated_ms", &updated_ms.to_string())?;
     write_meta(&transaction, "item_count", &total.to_string())?;
+    let content_changed = force_rebuild
+        || added > 0
+        || updated > 0
+        || removed > 0
+        || failed > 0
+        || old_model_version != Some(MODEL_VERSION)
+        || old_preprocess_version != Some(PREPROCESS_VERSION);
+    let revision = if content_changed {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        old_revision.unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+    };
+    write_meta(&transaction, "revision", &revision)?;
     write_meta(&transaction, "state", "ready")?;
     transaction
         .commit()
@@ -325,6 +346,7 @@ where
     Ok(DedupIndexUpdateSummary {
         index_id: paths.index_id,
         root_path: root.to_string_lossy().to_string(),
+        max_depth: config.max_depth,
         unchanged,
         added,
         updated,
@@ -355,7 +377,9 @@ fn write_prepared_item(
         existing,
         reuse,
     } = prepared.work;
-    let absolute_path = normalize_path(&source.path);
+    let absolute_path = usable_index_path(&source.path.to_string_lossy())
+        .to_string_lossy()
+        .to_string();
     let relative_path = source
         .path
         .strip_prefix(root)
@@ -556,11 +580,12 @@ fn load_existing(
         Option<Mmap>,
         Option<u32>,
         Option<u32>,
+        Option<String>,
     ),
     String,
 > {
     if !paths.database.is_file() {
-        return Ok((HashMap::new(), None, None, None));
+        return Ok((HashMap::new(), None, None, None, None));
     }
     let connection = Connection::open(&paths.database)
         .map_err(|error| format!("打开旧索引数据库失败: {}", error))?;
@@ -568,6 +593,7 @@ fn load_existing(
         read_meta(&connection, "model_version").and_then(|value| value.parse().ok());
     let preprocess_version =
         read_meta(&connection, "preprocess_version").and_then(|value| value.parse().ok());
+    let revision = read_meta(&connection, "revision");
     let records = read_records(&connection)?;
     let map = records
         .into_iter()
@@ -583,7 +609,7 @@ fn load_existing(
     } else {
         None
     };
-    Ok((map, mmap, model_version, preprocess_version))
+    Ok((map, mmap, model_version, preprocess_version, revision))
 }
 
 pub fn read_records(connection: &Connection) -> Result<Vec<IndexRecord>, String> {
@@ -599,7 +625,9 @@ pub fn read_records(connection: &Connection) -> Result<Vec<IndexRecord>, String>
         .query_map([], |row| {
             Ok(IndexRecord {
                 id: row.get(0)?,
-                absolute_path: row.get(1)?,
+                absolute_path: usable_index_path(&row.get::<_, String>(1)?)
+                    .to_string_lossy()
+                    .to_string(),
                 relative_path: row.get(2)?,
                 filename: row.get(3)?,
                 kind: DedupImageKind::from_i64(row.get(4)?),
@@ -632,7 +660,9 @@ pub fn read_record_by_id(connection: &Connection, item_id: i64) -> Result<IndexR
             |row| {
                 Ok(IndexRecord {
                     id: row.get(0)?,
-                    absolute_path: row.get(1)?,
+                    absolute_path: usable_index_path(&row.get::<_, String>(1)?)
+                        .to_string_lossy()
+                        .to_string(),
                     relative_path: row.get(2)?,
                     filename: row.get(3)?,
                     kind: DedupImageKind::from_i64(row.get(4)?),
@@ -660,6 +690,8 @@ pub fn get_index_status(app_data: &Path, root: &Path) -> Result<DedupIndexStatus
         return Ok(DedupIndexStatus {
             index_id: paths.index_id,
             root_path: root.to_string_lossy().to_string(),
+            max_depth: 0,
+            revision: None,
             exists: false,
             item_count: 0,
             total_bytes: 0,
@@ -675,6 +707,10 @@ pub fn get_index_status(app_data: &Path, root: &Path) -> Result<DedupIndexStatus
         index_id: paths.index_id,
         root_path: read_meta(&connection, "root_path")
             .unwrap_or_else(|| root.to_string_lossy().to_string()),
+        max_depth: read_meta(&connection, "max_depth")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0),
+        revision: read_meta(&connection, "revision"),
         exists: true,
         item_count: read_meta(&connection, "item_count")
             .and_then(|value| value.parse().ok())
@@ -711,6 +747,10 @@ pub fn list_indexes(app_data: &Path) -> Result<Vec<DedupIndexSummary>, String> {
         result.push(DedupIndexSummary {
             index_id,
             root_path: read_meta(&connection, "root_path").unwrap_or_default(),
+            max_depth: read_meta(&connection, "max_depth")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0),
+            revision: read_meta(&connection, "revision"),
             item_count: read_meta(&connection, "item_count")
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(0),
@@ -765,6 +805,37 @@ pub fn open_index(app_data: &Path, root: &Path) -> Result<(IndexPaths, Connectio
     let mmap = unsafe { MmapOptions::new().map(&file) }
         .map_err(|error| format!("映射向量文件失败: {}", error))?;
     Ok((paths, connection, mmap))
+}
+
+pub fn open_index_snapshot(app_data: &Path, root: &Path) -> Result<IndexSnapshot, String> {
+    let (_paths, connection, vectors) = open_index(app_data, root)?;
+    let revision = read_meta(&connection, "revision")
+        .ok_or_else(|| "图库索引缺少修订号，请先更新索引".to_string())?;
+    let records = read_records(&connection)?;
+    Ok(IndexSnapshot {
+        revision,
+        records,
+        vectors,
+    })
+}
+
+pub fn embedding_values(vectors: &[u8], record: &IndexRecord) -> Result<Vec<f32>, String> {
+    let expected = VECTOR_BYTES as u64;
+    if record.vector_length != expected {
+        return Err(format!("索引向量长度异常: {}", record.absolute_path));
+    }
+    let start =
+        usize::try_from(record.vector_offset).map_err(|_| "索引向量偏移无法转换".to_string())?;
+    let end = start
+        .checked_add(record.vector_length as usize)
+        .ok_or_else(|| "索引向量偏移溢出".to_string())?;
+    let bytes = vectors
+        .get(start..end)
+        .ok_or_else(|| format!("索引向量偏移越界: {}", record.absolute_path))?;
+    Ok(bytes
+        .chunks_exact(4)
+        .map(|value| f32::from_le_bytes(value.try_into().unwrap()))
+        .collect())
 }
 
 fn write_meta(
@@ -878,6 +949,24 @@ pub fn normalize_path(path: &Path) -> String {
     }
 }
 
+pub fn usable_index_path(value: &str) -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        let forward = value.replace('\\', "/");
+        let lower = forward.to_ascii_lowercase();
+        if lower.starts_with("//?/unc/") {
+            return PathBuf::from(format!("\\\\{}", forward[8..].replace('/', "\\")));
+        }
+        if lower.starts_with("//?/") {
+            return PathBuf::from(forward[4..].replace('/', "\\"));
+        }
+        if lower.starts_with("unc/") {
+            return PathBuf::from(format!("\\\\{}", forward[4..].replace('/', "\\")));
+        }
+    }
+    PathBuf::from(value)
+}
+
 fn directory_size(path: &Path) -> u64 {
     WalkDirSize::new(path).sum()
 }
@@ -938,5 +1027,18 @@ mod tests {
     fn rejects_invalid_index_ids() {
         assert!(validate_index_id("../bad").is_err());
         assert!(validate_index_id("0123456789abcdef01234567").is_ok());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn repairs_legacy_unc_index_paths() {
+        assert_eq!(
+            usable_index_path("unc/server/share/folder/image.jpg"),
+            PathBuf::from(r"\\server\share\folder\image.jpg")
+        );
+        assert_eq!(
+            usable_index_path(r"\\?\UNC\server\share\image.jpg"),
+            PathBuf::from(r"\\server\share\image.jpg")
+        );
     }
 }

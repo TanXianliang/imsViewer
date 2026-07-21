@@ -188,12 +188,37 @@ mod tests {
     use super::*;
     use image::{ExtendedColorType, ImageEncoder, Rgba, RgbaImage};
 
+    fn write_test_png(path: &Path) {
+        RgbaImage::from_pixel(2, 2, Rgba([12, 34, 56, 255]))
+            .save(path)
+            .unwrap();
+    }
+
     #[test]
     fn recognizes_supported_extensions() {
         assert!(is_supported_image(Path::new("a.jpg")));
         assert!(is_supported_image(Path::new("a.ims.png")));
         assert!(is_supported_image(Path::new("a.avif")));
         assert!(!is_supported_image(Path::new("a.gif")));
+    }
+
+    #[test]
+    fn enumeration_depth_zero_is_unlimited() {
+        let workspace = tempfile::tempdir().unwrap();
+        let child = workspace.path().join("child");
+        let grandchild = child.join("grandchild");
+        std::fs::create_dir_all(&grandchild).unwrap();
+        write_test_png(&workspace.path().join("root.png"));
+        write_test_png(&child.join("child.png"));
+        write_test_png(&grandchild.join("grandchild.png"));
+
+        let unlimited = enumerate_sources(workspace.path(), true, 0).unwrap();
+        let one_level = enumerate_sources(workspace.path(), true, 1).unwrap();
+        let root_only = enumerate_sources(workspace.path(), false, 0).unwrap();
+
+        assert_eq!(unlimited.len(), 3);
+        assert_eq!(one_level.len(), 2);
+        assert_eq!(root_only.len(), 1);
     }
 
     #[test]

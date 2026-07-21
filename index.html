@@ -144,19 +144,24 @@
       </div>
 
       <div class="dedup-settings">
-        <div class="dedup-field dedup-field-wide">
+        <div class="dedup-mode-switch" role="tablist" aria-label="查重模式">
+          <button id="dedup-mode-single" class="active" type="button" role="tab" aria-selected="true">单张图片查重</button>
+          <button id="dedup-mode-batch" type="button" role="tab" aria-selected="false">图库批量查重</button>
+          <span id="dedup-mode-description">选择一张源图片，在所有目标目录中查找相似图片。</span>
+        </div>
+        <div id="dedup-source-field" class="dedup-field dedup-field-wide">
           <label for="dedup-source-path">源图片</label>
           <input id="dedup-source-path" class="path-input" type="text" readonly placeholder="选择 JPEG、PNG、WebP、AVIF 或 IMS 文件" />
           <button id="dedup-pick-source" class="btn-browse">选择图片</button>
         </div>
-        <div class="dedup-field dedup-field-wide">
-          <label for="dedup-gallery-path">目标图库</label>
-          <input id="dedup-gallery-path" class="path-input" type="text" readonly placeholder="选择要建立索引并查重的文件夹" />
-          <button id="dedup-pick-gallery" class="btn-browse">选择文件夹</button>
+        <div class="dedup-field dedup-field-wide dedup-gallery-field">
+          <label>目标图库</label>
+          <div id="dedup-gallery-list" class="dedup-gallery-list">
+            <span class="dedup-gallery-empty">尚未添加目标目录</span>
+          </div>
+          <button id="dedup-pick-gallery" class="btn-browse">添加目录</button>
         </div>
         <div class="dedup-options-row">
-          <label><input id="dedup-recursive" type="checkbox" checked /> 包含子目录</label>
-          <label>扫描深度 <input id="dedup-max-depth" class="depth-input" type="number" min="0" max="100" value="0" title="0=无限深度" /></label>
           <label><input id="dedup-multi-threaded" type="checkbox" checked /> 多线程处理</label>
           <label>线程数 <input id="dedup-worker-count" class="depth-input" type="number" min="1" max="64" placeholder="自动" /></label>
           <label>查重强度
@@ -170,12 +175,18 @@
           <label id="dedup-custom-threshold-wrap" style="display:none">SSCD 阈值
             <input id="dedup-threshold" class="depth-input" type="number" min="0" max="1" step="0.01" value="0.75" />
           </label>
+          <label id="dedup-batch-scan-mode-wrap" hidden>扫描方式
+            <select id="dedup-batch-scan-mode">
+              <option value="quick" selected>快速扫描（HNSW 候选）</option>
+              <option value="complete">完整扫描（全部图片对）</option>
+            </select>
+          </label>
         </div>
         <div class="dedup-actions">
           <button id="dedup-start" class="btn-primary">开始查重</button>
           <button id="dedup-update" class="btn-secondary">仅更新索引</button>
           <button id="dedup-cancel" class="btn-secondary" disabled>取消任务</button>
-          <span id="dedup-index-status">尚未选择图库</span>
+          <span id="dedup-index-status">尚未添加目标目录</span>
         </div>
       </div>
 
@@ -184,6 +195,7 @@
         <div id="dedup-progress-text" class="progress-text">准备就绪</div>
       </div>
 
+      <section id="dedup-single-results" class="dedup-mode-results">
       <div class="dedup-results-header">
         <strong id="dedup-result-count">查找结果：0</strong>
         <label>筛选
@@ -222,6 +234,14 @@
         <span id="dedup-page-label">第 1 / 1 页</span>
         <button id="dedup-next-page" class="btn-secondary" disabled>下一页</button>
       </div>
+      </section>
+
+      <section id="dedup-batch-results" class="dedup-mode-results" hidden>
+        <div id="dedup-batch-runs" class="dedup-batch-runs" aria-label="批量查重任务"></div>
+        <div id="dedup-batch-groups" class="dedup-batch-groups" aria-live="polite">
+          <div class="dedup-batch-empty">选择目标目录后开始批量查重；无需选择源图片。</div>
+        </div>
+      </section>
     </div>
 
     <!-- 状态栏 -->
@@ -247,8 +267,8 @@
         </div>
         <div class="dedup-index-list-wrap">
           <table class="dedup-results-table">
-            <thead><tr><th>图库路径</th><th>图片数</th><th>占用空间</th><th>更新时间</th><th>状态</th><th>操作</th></tr></thead>
-            <tbody id="dedup-index-list"><tr class="dedup-empty-row"><td colspan="6">正在加载...</td></tr></tbody>
+            <thead><tr><th>图库路径</th><th>深度</th><th>图片数</th><th>占用空间</th><th>更新时间</th><th>状态</th><th>操作</th></tr></thead>
+            <tbody id="dedup-index-list"><tr class="dedup-empty-row"><td colspan="7">正在加载...</td></tr></tbody>
           </table>
         </div>
       </div>

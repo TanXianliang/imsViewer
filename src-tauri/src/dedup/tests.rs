@@ -68,7 +68,7 @@ fn index_update_search_and_cleanup_round_trip() {
     let config = DedupIndexConfig {
         root_path: gallery.to_string_lossy().to_string(),
         recursive: true,
-        max_depth: 0,
+        max_depth: 2,
         multi_threaded: true,
         worker_count: Some(2),
     };
@@ -76,6 +76,10 @@ fn index_update_search_and_cleanup_round_trip() {
     let first = update_index(&app_data, &config, model.clone(), &cancel, |_, _, _, _| {}).unwrap();
     assert_eq!(first.final_count, 5);
     assert_eq!(first.added, 5);
+    let first_revision = get_index_status(&app_data, &gallery)
+        .unwrap()
+        .revision
+        .expect("index revision");
 
     let response = search_index(
         &app_data,
@@ -120,12 +124,28 @@ fn index_update_search_and_cleanup_round_trip() {
     std::fs::remove_file(&unrelated_path).unwrap();
     cancel.store(true, Ordering::Relaxed);
     assert!(update_index(&app_data, &config, model.clone(), &cancel, |_, _, _, _| {}).is_err());
-    assert_eq!(get_index_status(&app_data, &gallery).unwrap().item_count, 5);
+    let cancelled_status = get_index_status(&app_data, &gallery).unwrap();
+    assert_eq!(cancelled_status.item_count, 5);
+    assert_eq!(cancelled_status.revision, Some(first_revision.clone()));
     cancel.store(false, Ordering::Relaxed);
-    let second = update_index(&app_data, &config, model, &cancel, |_, _, _, _| {}).unwrap();
+    let second = update_index(&app_data, &config, model.clone(), &cancel, |_, _, _, _| {}).unwrap();
     assert_eq!(second.removed, 1);
     assert_eq!(second.unchanged, 4);
     assert_eq!(second.final_count, 4);
+    let second_revision = get_index_status(&app_data, &gallery)
+        .unwrap()
+        .revision
+        .expect("updated revision");
+    assert_ne!(second_revision, first_revision);
+    let unchanged = update_index(&app_data, &config, model, &cancel, |_, _, _, _| {}).unwrap();
+    assert_eq!(
+        unchanged.added + unchanged.updated + unchanged.removed + unchanged.failed,
+        0
+    );
+    assert_eq!(
+        get_index_status(&app_data, &gallery).unwrap().revision,
+        Some(second_revision)
+    );
 
     let single_threaded = DedupIndexConfig {
         multi_threaded: false,
@@ -147,6 +167,7 @@ fn index_update_search_and_cleanup_round_trip() {
     let status = get_index_status(&app_data, &gallery).unwrap();
     assert!(status.exists);
     assert_eq!(status.item_count, 4);
+    assert_eq!(status.max_depth, 2);
     assert!(delete_index(&app_data, &status.index_id).unwrap() > 0);
     assert!(!get_index_status(&app_data, &gallery).unwrap().exists);
 }

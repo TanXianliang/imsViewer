@@ -68,6 +68,8 @@ pub struct DedupModelStatus {
 pub struct DedupIndexStatus {
     pub index_id: String,
     pub root_path: String,
+    pub max_depth: u32,
+    pub revision: Option<String>,
     pub exists: bool,
     pub item_count: u64,
     pub total_bytes: u64,
@@ -81,6 +83,8 @@ pub struct DedupIndexStatus {
 pub struct DedupIndexSummary {
     pub index_id: String,
     pub root_path: String,
+    pub max_depth: u32,
+    pub revision: Option<String>,
     pub item_count: u64,
     pub total_bytes: u64,
     pub last_updated_ms: Option<u64>,
@@ -91,6 +95,7 @@ pub struct DedupIndexSummary {
 pub struct DedupIndexUpdateSummary {
     pub index_id: String,
     pub root_path: String,
+    pub max_depth: u32,
     pub unchanged: u64,
     pub added: u64,
     pub updated: u64,
@@ -168,4 +173,190 @@ pub struct DedupProgressPayload {
     pub current_file: Option<String>,
     pub message: String,
     pub status: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchScanMode {
+    Quick,
+    Complete,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchScanRequest {
+    pub root_paths: Vec<String>,
+    pub mode: BatchScanMode,
+    pub threshold: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BatchMemberSource {
+    pub batch_item_id: i64,
+    pub item_id: i64,
+    pub index_root_path: String,
+    pub filepath: String,
+    pub filename: String,
+    pub kind: String,
+    pub image_format: String,
+    pub width: u32,
+    pub height: u32,
+    pub file_size: u64,
+    pub modified_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AcceptedEdge {
+    pub left_item_id: i64,
+    pub right_item_id: i64,
+    pub similarity: f32,
+    pub reason: String,
+}
+
+impl AcceptedEdge {
+    pub fn new(left_item_id: i64, right_item_id: i64, similarity: f32, reason: &str) -> Self {
+        Self {
+            left_item_id,
+            right_item_id,
+            similarity,
+            reason: reason.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BatchGroupMember {
+    pub batch_item_id: i64,
+    pub item_id: i64,
+    pub index_root_path: String,
+    pub filepath: String,
+    pub filename: String,
+    pub kind: String,
+    pub image_format: String,
+    pub width: u32,
+    pub height: u32,
+    pub file_size: u64,
+    pub modified_ms: i64,
+    pub linked_item_id: Option<i64>,
+    pub similarity: Option<f32>,
+    pub reason: Option<String>,
+    pub recommended: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BatchGroup {
+    pub group_id: i64,
+    pub member_count: u64,
+    pub total_bytes: u64,
+    pub reclaimable_bytes: u64,
+    pub recommended_item_id: i64,
+    pub min_similarity: f32,
+    pub max_similarity: f32,
+    pub members: Vec<BatchGroupMember>,
+    pub edges: Vec<AcceptedEdge>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BatchGroupSummary {
+    pub group_id: i64,
+    pub member_count: u64,
+    pub total_bytes: u64,
+    pub reclaimable_bytes: u64,
+    pub recommended_item_id: i64,
+    pub min_similarity: f32,
+    pub max_similarity: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchRunSummary {
+    pub run_id: String,
+    pub root_paths: Vec<String>,
+    pub mode: BatchScanMode,
+    pub status: String,
+    pub index_revision: String,
+    pub threshold: f32,
+    pub created_ms: u64,
+    pub updated_ms: u64,
+    pub processed_pairs: u64,
+    pub total_pairs: u64,
+    pub candidate_pairs: u64,
+    pub accepted_pairs: u64,
+    pub group_count: u64,
+    pub resumable: bool,
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchGroupPage {
+    pub page: u64,
+    pub page_size: u64,
+    pub total: u64,
+    pub items: Vec<BatchGroupSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchMemberPage {
+    pub group_id: i64,
+    pub page: u64,
+    pub page_size: u64,
+    pub total: u64,
+    pub items: Vec<BatchGroupMember>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BatchCheckpoint {
+    pub next_left_block: usize,
+    pub processed_pairs: u64,
+    pub candidate_pairs: u64,
+    pub parent: Vec<usize>,
+    pub rank: Vec<u8>,
+    pub accepted_edges: Vec<AcceptedEdge>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchProgressPayload {
+    pub run_id: String,
+    pub phase: String,
+    pub processed_pairs: u64,
+    pub total_pairs: u64,
+    pub candidate_pairs: u64,
+    pub accepted_pairs: u64,
+    pub message: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteBatchRunResult {
+    pub deleted_runs: u64,
+    pub released_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DeleteDedupFileResult {
+    pub deleted: bool,
+    pub filepath: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BatchAutoDeletePreview {
+    pub threshold: f32,
+    pub candidate_count: u64,
+    pub candidate_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BatchAutoDeleteFailure {
+    pub filepath: String,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BatchAutoDeleteResult {
+    pub threshold: f32,
+    pub candidate_count: u64,
+    pub deleted_count: u64,
+    pub missing_count: u64,
+    pub failed_count: u64,
+    pub released_bytes: u64,
+    pub remaining_group_count: u64,
+    pub failures: Vec<BatchAutoDeleteFailure>,
 }

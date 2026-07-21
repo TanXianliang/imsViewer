@@ -1,13 +1,15 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { createDedupBatchController } from './dedup-batch.js';
 
 const PAGE_SIZE = 50;
 const THUMBNAIL_CONCURRENCY = 3;
 
 const dedupState = {
   visible: false,
+  mode: 'single',
   sourcePath: '',
-  galleryPath: '',
+  galleryDirectories: [],
   activeJobId: null,
   busy: false,
   results: [],
@@ -21,18 +23,20 @@ const dedupState = {
 
 let openFileCallback = null;
 let thumbnailObserver = null;
+let batchController = null;
 
 const $ = selector => document.querySelector(selector);
 
 export function setupDedupTool({ openFile }) {
   openFileCallback = openFile;
+  initializeBatchController();
 
   window.addEventListener('imsviewer:open-dedup', showDedupWorkspace);
   $('#dedup-back').addEventListener('click', hideDedupWorkspace);
   $('#dedup-pick-source').addEventListener('click', pickSource);
   $('#dedup-pick-gallery').addEventListener('click', pickGallery);
   $('#dedup-profile').addEventListener('change', updateThresholdVisibility);
-  $('#dedup-start').addEventListener('click', startDedupSearch);
+  $('#dedup-start').addEventListener('click', startCurrentDedupMode);
   $('#dedup-update').addEventListener('click', updateCurrentIndex);
   $('#dedup-cancel').addEventListener('click', cancelActiveJob);
   $('#dedup-result-filter').addEventListener('change', applyResultView);
@@ -43,6 +47,8 @@ export function setupDedupTool({ openFile }) {
   $('#dedup-index-close').addEventListener('click', closeIndexManager);
   $('#dedup-index-close-footer').addEventListener('click', closeIndexManager);
   $('#dedup-delete-all-indexes').addEventListener('click', deleteAllIndexes);
+  $('#dedup-mode-single').addEventListener('click', () => setDedupMode('single'));
+  $('#dedup-mode-batch').addEventListener('click', () => setDedupMode('batch'));
 
   listen('dedup-index-progress', event => {
     const payload = event.payload;
@@ -51,6 +57,60 @@ export function setupDedupTool({ openFile }) {
   });
 
   updateThresholdVisibility();
+  setDedupMode('single');
+}
+
+function initializeBatchController() {
+  batchController = createDedupBatchController({
+    getGalleryDirectories: () => dedupState.galleryDirectories,
+    getThreshold: currentThreshold,
+    ensureIndexes: ensureBatchIndexes,
+    onJobStart: beginTask,
+    onJobFinish: finishTask,
+    onProgress: showProgress,
+    setMessage,
+    openFile: async path => {
+      hideDedupWorkspace();
+      await openFileCallback(path);
+    },
+    formatSize,
+    formatNumber,
+    formatDate,
+  });
+}
+
+function setDedupMode(mode) {
+  dedupState.mode = mode === 'batch' ? 'batch' : 'single';
+  const batch = dedupState.mode === 'batch';
+  $('#dedup-mode-single').classList.toggle('active', !batch);
+  $('#dedup-mode-batch').classList.toggle('active', batch);
+  $('#dedup-mode-single').setAttribute('aria-selected', String(!batch));
+  $('#dedup-mode-batch').setAttribute('aria-selected', String(batch));
+  $('#dedup-source-field').hidden = batch;
+  $('#dedup-batch-scan-mode-wrap').hidden = !batch;
+  $('#dedup-single-results').hidden = batch;
+  $('#dedup-batch-results').hidden = !batch;
+  $('#dedup-start').textContent = batch ? '开始批量查重' : '开始查重';
+  $('#dedup-mode-description').textContent = batch
+    ? '不需要源图片；对所有目标目录中的图片互相查重，并按关联关系分组。'
+    : '选择一张源图片，在所有目标目录中查找相似图片。';
+  if (batch && dedupState.visible) {
+    batchController.activate().catch(error => setMessage(`读取批量任务失败：${error}`, true));
+  } else {
+    batchController.deactivate();
+  }
+}
+
+async function startCurrentDedupMode() {
+  if (dedupState.mode === 'batch') {
+    try {
+      await batchController.start();
+    } catch (error) {
+      finishTask(`批量查重失败：${error}`, true);
+    }
+    return;
+  }
+  await startDedupSearch();
 }
 
 async function showDedupWorkspace() {
@@ -60,11 +120,15 @@ async function showDedupWorkspace() {
   $('#dedup-workspace').style.display = 'flex';
   document.title = 'imsViewer - 图片查重';
   if (!dedupState.modelChecked) await refreshModelStatus();
-  if (dedupState.galleryPath) await refreshIndexStatus();
+  if (dedupState.galleryDirectories.length) await refreshIndexStatus();
+  if (dedupState.mode === 'batch') {
+    await batchController.activate().catch(error => setMessage(`读取批量任务失败：${error}`, true));
+  }
 }
 
 function hideDedupWorkspace() {
   dedupState.visible = false;
+  batchController.deactivate();
   resetThumbnailLoading();
   $('#dedup-workspace').style.display = 'none';
   $('#main-container').style.display = 'grid';
@@ -98,9 +162,94 @@ async function pickSource() {
 async function pickGallery() {
   const path = await invoke('pick_folder');
   if (!path) return;
-  dedupState.galleryPath = path;
-  $('#dedup-gallery-path').value = path;
+  addGalleryDirectory(path);
   await refreshIndexStatus();
+}
+
+function clampDepth(value) {
+  const depth = Number(value);
+  return Number.isInteger(depth) ? Math.max(0, Math.min(100, depth)) : 0;
+}
+
+function galleryKey(path) {
+  return path.replace(/\\/g, '/').replace(/\/+$/, '').toLocaleLowerCase();
+}
+
+function addGalleryDirectory(path, maxDepth = null) {
+  const key = galleryKey(path);
+  const existing = dedupState.galleryDirectories.find(directory => galleryKey(directory.path) === key);
+  if (existing) {
+    if (maxDepth !== null) existing.maxDepth = clampDepth(maxDepth);
+    renderGalleryDirectories();
+    return existing;
+  }
+  const directory = { path, maxDepth: clampDepth(maxDepth ?? 0), status: '索引状态待检查' };
+  dedupState.galleryDirectories.push(directory);
+  renderGalleryDirectories();
+  return directory;
+}
+
+function renderGalleryDirectories() {
+  const container = $('#dedup-gallery-list');
+  container.innerHTML = '';
+  if (!dedupState.galleryDirectories.length) {
+    const empty = document.createElement('span');
+    empty.className = 'dedup-gallery-empty';
+    empty.textContent = '尚未添加目标目录';
+    container.appendChild(empty);
+    return;
+  }
+
+  dedupState.galleryDirectories.forEach((directory, index) => {
+    const row = document.createElement('div');
+    row.className = 'dedup-gallery-row';
+
+    const path = document.createElement('input');
+    path.className = 'path-input';
+    path.type = 'text';
+    path.readOnly = true;
+    path.value = directory.path;
+    path.title = directory.path;
+
+    const depthLabel = document.createElement('label');
+    depthLabel.className = 'dedup-gallery-depth-label';
+    depthLabel.textContent = '深度';
+    const depth = document.createElement('input');
+    depth.className = 'depth-input dedup-gallery-depth';
+    depth.type = 'number';
+    depth.min = '0';
+    depth.max = '100';
+    depth.value = String(directory.maxDepth);
+    depth.title = '0=遍历全部子目录；1=一层子目录';
+    depth.disabled = dedupState.busy;
+    depth.addEventListener('change', () => {
+      directory.maxDepth = clampDepth(depth.value);
+      depth.value = String(directory.maxDepth);
+      directory.status = '深度已修改，需更新索引';
+      renderGalleryDirectories();
+      updateIndexStatusSummary();
+    });
+    depthLabel.appendChild(depth);
+
+    const status = document.createElement('span');
+    status.className = 'dedup-gallery-status';
+    status.textContent = directory.status;
+    status.title = directory.status;
+
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'btn-secondary dedup-gallery-remove';
+    remove.textContent = '移除';
+    remove.disabled = dedupState.busy;
+    remove.addEventListener('click', () => {
+      dedupState.galleryDirectories.splice(index, 1);
+      renderGalleryDirectories();
+      updateIndexStatusSummary();
+    });
+
+    row.append(path, depthLabel, status, remove);
+    container.appendChild(row);
+  });
 }
 
 function updateThresholdVisibility() {
@@ -114,12 +263,12 @@ function currentThreshold() {
   return Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0.75));
 }
 
-function currentIndexConfig(rootPath = dedupState.galleryPath) {
+function currentIndexConfig(directory) {
   const workerValue = Number($('#dedup-worker-count').value);
   return {
-    root_path: rootPath,
-    recursive: $('#dedup-recursive').checked,
-    max_depth: Math.max(0, Math.min(100, Number($('#dedup-max-depth').value) || 0)),
+    root_path: directory.path,
+    recursive: true,
+    max_depth: directory.maxDepth,
     multi_threaded: $('#dedup-multi-threaded').checked,
     worker_count: Number.isInteger(workerValue) && workerValue > 0 ? workerValue : null,
   };
@@ -128,7 +277,10 @@ function currentIndexConfig(rootPath = dedupState.galleryPath) {
 async function startDedupSearch() {
   if (!validateInputs(true)) return;
   try {
-    await runIndexUpdate(dedupState.galleryPath);
+    for (const directory of dedupState.galleryDirectories) {
+      await runIndexUpdate(directory);
+    }
+    await refreshIndexStatus();
     if (!dedupState.busy && dedupState.activeJobId === null) {
       await runSearch();
     }
@@ -140,11 +292,24 @@ async function startDedupSearch() {
 async function updateCurrentIndex() {
   if (!validateInputs(false)) return;
   try {
-    await runIndexUpdate(dedupState.galleryPath);
+    for (const directory of dedupState.galleryDirectories) {
+      await runIndexUpdate(directory);
+    }
+    await refreshIndexStatus();
     finishTask('索引更新完成');
   } catch (error) {
     finishTask(`索引更新失败：${error}`, true);
   }
+}
+
+async function ensureBatchIndexes() {
+  if (!validateInputs(false)) throw new Error('请先添加至少一个目标图库目录');
+  const summaries = [];
+  for (const directory of dedupState.galleryDirectories) {
+    summaries.push(await runIndexUpdate(directory));
+  }
+  await refreshIndexStatus();
+  return summaries;
 }
 
 function validateInputs(requireSource) {
@@ -152,26 +317,28 @@ function validateInputs(requireSource) {
     setMessage('请先选择源图片', true);
     return false;
   }
-  if (!dedupState.galleryPath) {
-    setMessage('请先选择目标图库', true);
+  if (!dedupState.galleryDirectories.length) {
+    setMessage('请先添加至少一个目标图库目录', true);
     return false;
   }
   return true;
 }
 
-async function runIndexUpdate(rootPath, rebuild = false) {
+async function runIndexUpdate(directory, rebuild = false) {
   const jobId = crypto.randomUUID();
-  beginTask(jobId, rebuild ? '正在重新建立图库索引...' : '正在扫描并增量更新索引...');
+  beginTask(jobId, `${rebuild ? '正在重新建立' : '正在增量更新'}：${directory.path}`);
   try {
     const summary = await invoke(rebuild ? 'dedup_rebuild_index' : 'dedup_update_index', {
       jobId,
-      config: currentIndexConfig(rootPath),
+      config: currentIndexConfig(directory),
     });
     if (dedupState.activeJobId !== jobId) throw new Error('任务已取消');
     dedupState.activeJobId = null;
     dedupState.busy = false;
     setBusyControls(false);
-    $('#dedup-index-status').textContent = `索引 ${formatNumber(summary.final_count)} 张 · 新增 ${summary.added} · 更新 ${summary.updated} · 清理 ${summary.removed} · 失败 ${summary.failed} · ${formatSize(summary.total_bytes)}`;
+    directory.status = `已索引 ${formatNumber(summary.final_count)} 张 · 深度 ${summary.max_depth} · ${formatSize(summary.total_bytes)}`;
+    renderGalleryDirectories();
+    updateIndexStatusSummary();
     showProgress(summary.final_count, summary.final_count, rebuild ? '索引重建完成' : '索引更新完成');
     return summary;
   } catch (error) {
@@ -185,24 +352,37 @@ async function runIndexUpdate(rootPath, rebuild = false) {
 }
 
 async function runSearch() {
-  const jobId = crypto.randomUUID();
-  beginTask(jobId, '正在计算源图片特征并搜索...');
-  showProgress(0, 0, '正在精确搜索全部达标结果');
+  const started = performance.now();
+  const mergedResults = new Map();
+  let totalIndexed = 0;
   try {
-    const response = await invoke('dedup_search', {
-      jobId,
-      request: {
-        source_path: dedupState.sourcePath,
-        root_path: dedupState.galleryPath,
-        threshold: currentThreshold(),
-        exclude_source: true,
-      },
-    });
-    if (dedupState.activeJobId !== jobId) return;
-    dedupState.results = response.results;
+    for (let index = 0; index < dedupState.galleryDirectories.length; index += 1) {
+      const directory = dedupState.galleryDirectories[index];
+      const jobId = crypto.randomUUID();
+      beginTask(jobId, `正在搜索目录 ${index + 1}/${dedupState.galleryDirectories.length}：${directory.path}`);
+      showProgress(index, dedupState.galleryDirectories.length, directory.path);
+      const response = await invoke('dedup_search', {
+        jobId,
+        request: {
+          source_path: dedupState.sourcePath,
+          root_path: directory.path,
+          threshold: currentThreshold(),
+          exclude_source: true,
+        },
+      });
+      if (dedupState.activeJobId !== jobId) return;
+      totalIndexed += response.total_indexed;
+      for (const result of response.results) {
+        const enriched = { ...result, index_root_path: response.root_path };
+        const key = galleryKey(result.filepath);
+        const existing = mergedResults.get(key);
+        if (!existing || enriched.confidence > existing.confidence) mergedResults.set(key, enriched);
+      }
+    }
+    dedupState.results = Array.from(mergedResults.values());
     dedupState.page = 0;
     applyResultView();
-    finishTask(`查重完成：扫描 ${formatNumber(response.total_indexed)} 张，找到 ${formatNumber(response.results.length)} 张，用时 ${formatDuration(response.elapsed_ms)}`);
+    finishTask(`查重完成：搜索 ${dedupState.galleryDirectories.length} 个目录、${formatNumber(totalIndexed)} 条索引，找到 ${formatNumber(dedupState.results.length)} 张，用时 ${formatDuration(performance.now() - started)}`);
   } catch (error) {
     finishTask(`查重失败：${error}`, true);
   }
@@ -230,10 +410,17 @@ function setBusyControls(busy) {
   $('#dedup-pick-source').disabled = busy;
   $('#dedup-pick-gallery').disabled = busy;
   $('#dedup-manage-indexes').disabled = busy;
+  $('#dedup-mode-single').disabled = busy;
+  $('#dedup-mode-batch').disabled = busy;
+  $('#dedup-batch-scan-mode').disabled = busy;
   $('#dedup-cancel').disabled = !busy;
+  document.querySelectorAll('.dedup-gallery-depth, .dedup-gallery-remove').forEach(element => {
+    element.disabled = busy;
+  });
 }
 
 async function cancelActiveJob() {
+  if (dedupState.mode === 'batch' && await batchController.cancelActive()) return;
   if (!dedupState.activeJobId) return;
   const jobId = dedupState.activeJobId;
   await invoke('dedup_cancel_job', { jobId });
@@ -257,14 +444,32 @@ function setMessage(message, isError) {
 }
 
 async function refreshIndexStatus() {
-  try {
-    const status = await invoke('dedup_get_index_status', { rootPath: dedupState.galleryPath });
-    $('#dedup-index-status').textContent = status.exists
-      ? `已有索引 ${formatNumber(status.item_count)} 张 · ${formatSize(status.total_bytes)} · ${formatDate(status.last_updated_ms)}`
-      : '图库尚未建立索引，开始查重时将自动建立';
-  } catch (error) {
-    $('#dedup-index-status').textContent = `索引状态读取失败：${error}`;
+  await Promise.all(dedupState.galleryDirectories.map(async directory => {
+    try {
+      const status = await invoke('dedup_get_index_status', { rootPath: directory.path });
+      directory.indexStatus = status;
+      directory.status = status.exists
+        ? `已索引 ${formatNumber(status.item_count)} 张 · 深度 ${status.max_depth}${status.max_depth !== directory.maxDepth ? `，需更新为 ${directory.maxDepth}` : ''}`
+        : '尚未建立索引';
+    } catch (error) {
+      directory.indexStatus = null;
+      directory.status = `状态读取失败：${error}`;
+    }
+  }));
+  renderGalleryDirectories();
+  updateIndexStatusSummary();
+}
+
+function updateIndexStatusSummary() {
+  if (!dedupState.galleryDirectories.length) {
+    $('#dedup-index-status').textContent = '尚未添加目标目录';
+    return;
   }
+  const statuses = dedupState.galleryDirectories.map(directory => directory.indexStatus).filter(Boolean);
+  const ready = statuses.filter(status => status.exists);
+  const itemCount = ready.reduce((sum, status) => sum + Number(status.item_count || 0), 0);
+  const totalBytes = ready.reduce((sum, status) => sum + Number(status.total_bytes || 0), 0);
+  $('#dedup-index-status').textContent = `${dedupState.galleryDirectories.length} 个目录 · ${ready.length} 套索引 · ${formatNumber(itemCount)} 张 · ${formatSize(totalBytes)}`;
 }
 
 function applyResultView() {
@@ -326,6 +531,7 @@ function renderResultPage() {
     placeholder.className = 'dedup-thumb-placeholder';
     placeholder.textContent = '后台加载';
     placeholder.dataset.itemId = String(result.item_id);
+    placeholder.dataset.rootPath = result.index_root_path;
     placeholder.dataset.generation = String(generation);
     previewCell.appendChild(placeholder);
 
@@ -408,7 +614,12 @@ async function verifyResult(result) {
 }
 
 function enqueueThumbnail(element, generation) {
-  dedupState.thumbnailQueue.push({ element, generation, itemId: Number(element.dataset.itemId) });
+  dedupState.thumbnailQueue.push({
+    element,
+    generation,
+    itemId: Number(element.dataset.itemId),
+    rootPath: element.dataset.rootPath,
+  });
   pumpThumbnailQueue();
 }
 
@@ -423,10 +634,10 @@ function pumpThumbnailQueue() {
   }
 }
 
-async function loadThumbnail({ element, generation, itemId }) {
+async function loadThumbnail({ element, generation, itemId, rootPath }) {
   try {
     const payload = await invoke('dedup_get_result_thumbnail', {
-      rootPath: dedupState.galleryPath,
+      rootPath,
       itemId,
     });
     if (generation !== dedupState.thumbnailGeneration || !element.isConnected) return;
@@ -451,17 +662,18 @@ function closeIndexManager() {
 
 async function refreshIndexManager() {
   const body = $('#dedup-index-list');
-  body.innerHTML = '<tr class="dedup-empty-row"><td colspan="6">正在加载...</td></tr>';
+  body.innerHTML = '<tr class="dedup-empty-row"><td colspan="7">正在加载...</td></tr>';
   try {
     const indexes = await invoke('dedup_list_indexes');
     body.innerHTML = '';
     if (!indexes.length) {
-      body.innerHTML = '<tr class="dedup-empty-row"><td colspan="6">尚未建立任何图库索引</td></tr>';
+      body.innerHTML = '<tr class="dedup-empty-row"><td colspan="7">尚未建立任何图库索引</td></tr>';
       return;
     }
     for (const index of indexes) {
       const row = body.insertRow();
       row.insertCell().textContent = index.root_path;
+      row.insertCell().textContent = index.max_depth === 0 ? '全部' : String(index.max_depth);
       row.insertCell().textContent = formatNumber(index.item_count);
       row.insertCell().textContent = formatSize(index.total_bytes);
       row.insertCell().textContent = formatDate(index.last_updated_ms);
@@ -471,9 +683,10 @@ async function refreshIndexManager() {
       actions.append(
         actionButton('更新', async () => {
           closeIndexManager();
-          dedupState.galleryPath = index.root_path;
-          $('#dedup-gallery-path').value = index.root_path;
-          await updateCurrentIndex();
+          const directory = addGalleryDirectory(index.root_path, index.max_depth);
+          await runIndexUpdate(directory);
+          await refreshIndexStatus();
+          finishTask('索引更新完成');
         }),
         actionButton('重建', () => rebuildOneIndex(index)),
         actionButton('删除', () => deleteOneIndex(index)),
@@ -485,17 +698,17 @@ async function refreshIndexManager() {
     const row = body.insertRow();
     row.className = 'dedup-empty-row';
     const cell = row.insertCell();
-    cell.colSpan = 6;
+    cell.colSpan = 7;
     cell.textContent = `加载索引失败：${error}`;
   }
 }
 
 async function rebuildOneIndex(index) {
   closeIndexManager();
-  dedupState.galleryPath = index.root_path;
-  $('#dedup-gallery-path').value = index.root_path;
+  const directory = addGalleryDirectory(index.root_path, index.max_depth);
   try {
-    await runIndexUpdate(index.root_path, true);
+    await runIndexUpdate(directory, true);
+    await refreshIndexStatus();
     finishTask('索引重建完成');
   } catch (error) {
     finishTask(`索引重建失败：${error}`, true);
@@ -507,7 +720,7 @@ async function deleteOneIndex(index) {
   const result = await invoke('dedup_delete_index', { indexId: index.index_id });
   setMessage(`已删除索引，释放 ${formatSize(result.released_bytes)}`, false);
   await refreshIndexManager();
-  if (dedupState.galleryPath === index.root_path) await refreshIndexStatus();
+  if (dedupState.galleryDirectories.some(directory => galleryKey(directory.path) === galleryKey(index.root_path))) await refreshIndexStatus();
 }
 
 async function deleteAllIndexes() {
@@ -515,7 +728,7 @@ async function deleteAllIndexes() {
   const result = await invoke('dedup_delete_all_indexes');
   setMessage(`已删除 ${result.deleted_indexes} 套索引，释放 ${formatSize(result.released_bytes)}`, false);
   await refreshIndexManager();
-  if (dedupState.galleryPath) await refreshIndexStatus();
+  if (dedupState.galleryDirectories.length) await refreshIndexStatus();
 }
 
 function formatSize(bytes) {

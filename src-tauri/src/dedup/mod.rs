@@ -1,3 +1,6 @@
+mod batch;
+mod batch_group;
+mod batch_store;
 mod feature;
 mod hash;
 mod index;
