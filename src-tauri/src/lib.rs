@@ -1418,7 +1418,7 @@ async fn start_batch_resize(
                 };
                 if outcome.is_err() {
                     has_error = true;
-                } else if let ResizeOutcome::Resized { .. } = outcome.unwrap() {
+                } else if let Ok(ResizeOutcome::Resized { .. }) = &outcome {
                     if let Some(cache) = app_handle.try_state::<ImsCache>() {
                         if let Ok(mut map) = cache.0.lock() {
                             map.remove(fp);

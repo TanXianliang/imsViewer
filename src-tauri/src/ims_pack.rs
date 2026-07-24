@@ -1134,4 +1134,53 @@ mod tests {
         let result = resize_ims_file(&ims_path, 400);
         assert!(result.is_err(), "corrupt sub-image should error whole file");
     }
+
+    #[test]
+    fn resize_preserves_alpha_for_png_sub_image() {
+        // 构造一张 800×600 的 RGBA PNG（含半透明像素）作为子图，
+        // 验证 PNG 分支在缩小后保留 alpha（color 仍为 Rgba8）。
+        let dir = tempdir().unwrap();
+        let img = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            800,
+            600,
+            image::Rgba([100, 120, 140, 128]),
+        ));
+        let mut bytes = Vec::new();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+        let entries = vec![UpEntry {
+            filename: "cover.png".into(),
+            format: 1u8,
+            bytes,
+            is_cover: true,
+        }];
+        let ims_path = dir
+            .path()
+            .join("test.ims.png")
+            .to_string_lossy()
+            .to_string();
+        write_ims_entries(&ims_path, &entries).unwrap();
+
+        let outcome = resize_ims_file(&ims_path, 400).unwrap();
+        match outcome {
+            ResizeOutcome::Resized { sub_images_resized } => {
+                assert_eq!(sub_images_resized, 1);
+            }
+            _ => panic!("expected Resized, got {:?}", outcome),
+        }
+
+        let info = parse_ims(&ims_path).unwrap();
+        let sub = read_sub_image(&ims_path, info.images[0].data_offset, info.images[0].data_length)
+            .unwrap();
+        let decoded = image::load_from_memory(&sub).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (400, 300));
+        assert_eq!(
+            decoded.color(),
+            image::ColorType::Rgba8,
+            "PNG sub-image should preserve alpha after resize"
+        );
+    }
 }
