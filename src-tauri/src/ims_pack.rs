@@ -1132,7 +1132,7 @@ mod tests {
     fn resize_skips_when_all_sub_images_within_max_edge() {
         let (_dir, ims_path) = make_ims_with_sub_images(&[(100, 100, 0)]);
         let original_bytes = std::fs::read(&ims_path).unwrap();
-        let outcome = resize_ims_file(&ims_path, 200).unwrap();
+        let outcome = resize_ims_file(&ims_path, 200, false).unwrap();
         assert!(matches!(outcome, ResizeOutcome::Skipped));
         // 文件字节未变
         assert_eq!(std::fs::read(&ims_path).unwrap(), original_bytes);
@@ -1141,9 +1141,9 @@ mod tests {
     #[test]
     fn resize_resizes_oversized_jpeg_and_preserves_aspect() {
         let (_dir, ims_path) = make_ims_with_sub_images(&[(800, 600, 0)]);
-        let outcome = resize_ims_file(&ims_path, 400).unwrap();
+        let outcome = resize_ims_file(&ims_path, 400, false).unwrap();
         match outcome {
-            ResizeOutcome::Resized { sub_images_resized } => assert_eq!(sub_images_resized, 1),
+            ResizeOutcome::Resized { sub_images_resized, .. } => assert_eq!(sub_images_resized, 1),
             _ => panic!("expected Resized"),
         }
         let info = parse_ims(&ims_path).unwrap();
@@ -1163,7 +1163,7 @@ mod tests {
         let small_before =
             read_sub_image(&ims_path, info_before.images[1].data_offset, info_before.images[1].data_length)
                 .unwrap();
-        resize_ims_file(&ims_path, 400).unwrap();
+        resize_ims_file(&ims_path, 400, false).unwrap();
         // 重写后重新解析，未超标子图字节应与原始一致
         let info_after = parse_ims(&ims_path).unwrap();
         let small_after =
@@ -1182,7 +1182,7 @@ mod tests {
             *b = 0xFF;
         }
         std::fs::write(&ims_path, &data).unwrap();
-        let result = resize_ims_file(&ims_path, 400);
+        let result = resize_ims_file(&ims_path, 400, false);
         assert!(result.is_err(), "corrupt sub-image should error whole file");
     }
 
@@ -1215,9 +1215,9 @@ mod tests {
             .to_string();
         write_ims_entries(&ims_path, &entries).unwrap();
 
-        let outcome = resize_ims_file(&ims_path, 400).unwrap();
+        let outcome = resize_ims_file(&ims_path, 400, false).unwrap();
         match outcome {
-            ResizeOutcome::Resized { sub_images_resized } => {
+            ResizeOutcome::Resized { sub_images_resized, .. } => {
                 assert_eq!(sub_images_resized, 1);
             }
             _ => panic!("expected Resized, got {:?}", outcome),
@@ -1232,6 +1232,138 @@ mod tests {
             decoded.color(),
             image::ColorType::Rgba8,
             "PNG sub-image should preserve alpha after resize"
+        );
+    }
+
+    /// 构造一个含单张指定尺寸/格式/是否带 alpha 子图的 IMS，返回 (临时目录, ims 路径)。
+    fn make_ims_single(format: u8, w: u32, h: u32, rgba: bool) -> (tempfile::TempDir, String) {
+        let dir = tempdir().unwrap();
+        let (bytes, ext) = match (format, rgba) {
+            (0, _) => {
+                let img = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+                    w, h, image::Rgb([100, 120, 140]),
+                ));
+                let mut b = Vec::new();
+                img.write_to(&mut std::io::Cursor::new(&mut b), image::ImageFormat::Jpeg)
+                    .unwrap();
+                (b, "jpg")
+            }
+            (1, true) => {
+                let img = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+                    w, h, image::Rgba([100, 120, 140, 128]),
+                ));
+                let mut b = Vec::new();
+                img.write_to(&mut std::io::Cursor::new(&mut b), image::ImageFormat::Png)
+                    .unwrap();
+                (b, "png")
+            }
+            (1, false) => {
+                let img = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+                    w, h, image::Rgb([100, 120, 140]),
+                ));
+                let mut b = Vec::new();
+                img.write_to(&mut std::io::Cursor::new(&mut b), image::ImageFormat::Png)
+                    .unwrap();
+                (b, "png")
+            }
+            _ => panic!("unsupported test format"),
+        };
+        let entries = vec![UpEntry {
+            filename: format!("cover.{}", ext),
+            format,
+            bytes,
+            is_cover: true,
+        }];
+        let ims_path = dir
+            .path()
+            .join(format!("test.ims.{}", ext))
+            .to_string_lossy()
+            .to_string();
+        write_ims_entries(&ims_path, &entries).unwrap();
+        (dir, ims_path)
+    }
+
+    #[test]
+    fn convert_to_jpeg_converts_undersized_png() {
+        // 未超标 PNG + convert_to_jpeg=true → 转 JPEG（不缩小）
+        let (_dir, ims_path) = make_ims_single(1, 100, 100, false);
+        let outcome = resize_ims_file(&ims_path, 400, true).unwrap();
+        match outcome {
+            ResizeOutcome::Resized {
+                sub_images_resized,
+                sub_images_converted,
+            } => {
+                assert_eq!(sub_images_resized, 0);
+                assert_eq!(sub_images_converted, 1);
+            }
+            _ => panic!("expected Resized"),
+        }
+        let info = parse_ims(&ims_path).unwrap();
+        assert_eq!(info.images[0].format, 0, "应转为 JPEG");
+        assert!(info.images[0].filename.ends_with(".jpg"), "扩展名应为 .jpg");
+        let sub = read_sub_image(&ims_path, info.images[0].data_offset, info.images[0].data_length)
+            .unwrap();
+        let decoded = image::load_from_memory(&sub).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (100, 100), "未超标不缩小");
+    }
+
+    #[test]
+    fn convert_to_jpeg_preserves_undersized_jpeg() {
+        // 未超标 JPEG + convert_to_jpeg=true → Skipped（已是 JPEG 不二次编码）
+        let (_dir, ims_path) = make_ims_single(0, 100, 100, false);
+        let original = std::fs::read(&ims_path).unwrap();
+        let outcome = resize_ims_file(&ims_path, 400, true).unwrap();
+        assert!(matches!(outcome, ResizeOutcome::Skipped));
+        assert_eq!(std::fs::read(&ims_path).unwrap(), original, "文件不应改动");
+    }
+
+    #[test]
+    fn convert_to_jpeg_oversized_png_resizes_and_converts() {
+        // 超标 PNG + convert_to_jpeg=true → 缩小 + 转 JPEG
+        let (_dir, ims_path) = make_ims_single(1, 800, 600, false);
+        let outcome = resize_ims_file(&ims_path, 400, true).unwrap();
+        match outcome {
+            ResizeOutcome::Resized {
+                sub_images_resized,
+                sub_images_converted,
+            } => {
+                assert_eq!(sub_images_resized, 1);
+                assert_eq!(sub_images_converted, 1);
+            }
+            _ => panic!("expected Resized"),
+        }
+        let info = parse_ims(&ims_path).unwrap();
+        assert_eq!(info.images[0].format, 0);
+        let sub = read_sub_image(&ims_path, info.images[0].data_offset, info.images[0].data_length)
+            .unwrap();
+        let decoded = image::load_from_memory(&sub).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (400, 300));
+    }
+
+    #[test]
+    fn no_convert_keeps_undersized_png() {
+        // 未超标 PNG + convert_to_jpeg=false → Skipped（回归：未勾选行为不变）
+        let (_dir, ims_path) = make_ims_single(1, 100, 100, false);
+        let original = std::fs::read(&ims_path).unwrap();
+        let outcome = resize_ims_file(&ims_path, 400, false).unwrap();
+        assert!(matches!(outcome, ResizeOutcome::Skipped));
+        assert_eq!(std::fs::read(&ims_path).unwrap(), original);
+    }
+
+    #[test]
+    fn convert_to_jpeg_flattens_alpha() {
+        // 带 alpha 的 PNG + convert_to_jpeg=true → 转 JPEG 后无 alpha
+        let (_dir, ims_path) = make_ims_single(1, 800, 600, true);
+        let outcome = resize_ims_file(&ims_path, 400, true).unwrap();
+        assert!(matches!(outcome, ResizeOutcome::Resized { .. }));
+        let info = parse_ims(&ims_path).unwrap();
+        let sub = read_sub_image(&ims_path, info.images[0].data_offset, info.images[0].data_length)
+            .unwrap();
+        let decoded = image::load_from_memory(&sub).unwrap();
+        assert_ne!(
+            decoded.color(),
+            image::ColorType::Rgba8,
+            "转 JPEG 后 alpha 应被合成"
         );
     }
 }
