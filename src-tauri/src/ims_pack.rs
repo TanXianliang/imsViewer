@@ -20,6 +20,7 @@ const THUMBNAIL_FORMAT_JPEG: u8 = 0;
 const THUMBNAIL_MAX_SIZE: u32 = 160;
 const THUMBNAIL_JPEG_QUALITY: u8 = 60;
 const RESIZE_JPEG_QUALITY: u8 = 88;
+const CONVERT_JPEG_QUALITY: u8 = 90;
 
 struct EmbeddedThumbnail {
     bytes: Vec<u8>,
@@ -173,14 +174,21 @@ pub struct BatchResizeConfig {
     /// 最长边像素下限 64
     pub max_edge: u32,
     pub multi_threaded: bool,
+    /// 是否将所有非 JPEG 子图转为 JPEG（q90）
+    #[serde(default)]
+    pub convert_to_jpeg: bool,
 }
 
 /// 单个 IMS 文件的调整结果
 #[derive(Debug, Clone)]
 pub enum ResizeOutcome {
-    /// 有子图被缩小，文件已重写；`sub_images_resized` 为被缩小的子图数
-    Resized { sub_images_resized: usize },
-    /// 全部子图未超标，文件未改动
+    /// 文件已重写；`sub_images_resized` 为被缩小的子图数，
+    /// `sub_images_converted` 为被转为 JPEG 的非 JPEG 子图数（未勾选转 JPEG 时恒为 0）
+    Resized {
+        sub_images_resized: usize,
+        sub_images_converted: usize,
+    },
+    /// 全部子图未超标且无需转码，文件未改动
     Skipped,
 }
 
@@ -551,40 +559,47 @@ pub fn upgrade_ims_file(filepath: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// 就地调整 IMS 文件中子图的分辨率。
+/// 就地调整 IMS 文件中子图的分辨率，可选将非 JPEG 子图转为 JPEG。
 ///
 /// 逐子图判断：若子图原始最长边 `> max_edge`，按保持长宽比缩小到最长边等于
-/// `max_edge`（`Lanczos3`）并重新编码；未超标子图保留原始字节不重编码。
-/// AVIF 子图用 `avif` 解码后转 PNG 重新编码。只要任一子图被缩小，整个
-/// IMS 文件会通过临时文件 + rename 原子重写；若全部子图未超标返回 `Skipped`。
+/// `max_edge`（`Lanczos3`）并重新编码；未超标子图默认保留原始字节。
+/// 当 `convert_to_jpeg` 为 true 时，所有非 JPEG 子图（PNG/WebP/AVIF）无论是否
+/// 超标都重新编码为 JPEG（q90）；已是 JPEG 且未超标的子图保留原字节不动。
+/// AVIF 子图用 `avif` 解码；未勾选转 JPEG 时 AVIF 转 PNG，勾选时转 JPEG。
+/// 只要任一子图被缩小或转码，整个 IMS 文件会通过临时文件 + rename 原子重写；
+/// 若全部子图未超标且无需转码返回 `Skipped`。
 /// 任一子图解码/编码失败则整文件跳过（返回 `Err`，原文件保持完好）。
-pub fn resize_ims_file(filepath: &str, max_edge: u32) -> Result<ResizeOutcome, String> {
+pub fn resize_ims_file(
+    filepath: &str,
+    max_edge: u32,
+    convert_to_jpeg: bool,
+) -> Result<ResizeOutcome, String> {
     use crate::ims::{parse_ims, read_sub_image};
 
     let ims_info = parse_ims(filepath)?;
 
     let mut entries: Vec<UpEntry> = Vec::with_capacity(ims_info.images.len());
     let mut resized_count: usize = 0;
+    let mut converted_count: usize = 0;
 
     for img in &ims_info.images {
         let bytes = read_sub_image(filepath, img.data_offset, img.data_length)?;
+        let is_jpeg = img.format == 0;
 
         // 解码：AVIF 走 avif crate，其余走 image crate
-        let (decoded, out_format, out_filename) = if img.format == 3 {
-            // AVIF → 解码后转 PNG
-            let d = decode_avif(&bytes)
-                .map_err(|e| format!("解码 AVIF 子图 {} 失败: {}", img.filename, e))?;
-            let new_name = with_png_extension(&img.filename);
-            (d, 1u8, new_name)
+        let decoded = if img.format == 3 {
+            decode_avif(&bytes)
+                .map_err(|e| format!("解码 AVIF 子图 {} 失败: {}", img.filename, e))?
         } else {
-            let d = image::load_from_memory(&bytes)
-                .map_err(|e| format!("解码子图 {} 失败: {}", img.filename, e))?;
-            (d, img.format, img.filename.clone())
+            image::load_from_memory(&bytes)
+                .map_err(|e| format!("解码子图 {} 失败: {}", img.filename, e))?
         };
 
         let longest = decoded.width().max(decoded.height());
-        if longest <= max_edge {
-            // 未超标：原样放回（保留原字节）
+        let oversized = longest > max_edge;
+
+        // 未超标且（已是 JPEG 或未勾选转码）→ 保留原字节
+        if !oversized && (is_jpeg || !convert_to_jpeg) {
             entries.push(UpEntry {
                 filename: img.filename.clone(),
                 format: img.format,
@@ -594,16 +609,35 @@ pub fn resize_ims_file(filepath: &str, max_edge: u32) -> Result<ResizeOutcome, S
             continue;
         }
 
-        // 超标：按比例缩小（longest 对应边 = max_edge）
-        let scale = max_edge as f64 / longest as f64;
-        let new_w = std::cmp::max(1, (decoded.width() as f64 * scale).round() as u32);
-        let new_h = std::cmp::max(1, (decoded.height() as f64 * scale).round() as u32);
-        let resized = decoded
-            .resize_exact(new_w, new_h, image::imageops::FilterType::Lanczos3);
+        // 需要重编码：确定目标格式
+        // 勾选转 JPEG → 统一 JPEG(0)；未勾选 → AVIF 转 PNG(1)，其余保持原格式
+        let target_format: u8 = if convert_to_jpeg {
+            0
+        } else if img.format == 3 {
+            1
+        } else {
+            img.format
+        };
 
-        // 编码到目标格式
+        // 确定待编码的图（超标则先缩小，未超标转码则图不变尺寸）
+        let image_to_encode = if oversized {
+            let scale = max_edge as f64 / longest as f64;
+            let new_w = std::cmp::max(1, (decoded.width() as f64 * scale).round() as u32);
+            let new_h = std::cmp::max(1, (decoded.height() as f64 * scale).round() as u32);
+            decoded.resize_exact(new_w, new_h, image::imageops::FilterType::Lanczos3)
+        } else {
+            decoded
+        };
+
+        // JPEG 质量：原 JPEG 子图用 88，非 JPEG 转 JPEG 用 90
+        let jpeg_quality = if is_jpeg {
+            RESIZE_JPEG_QUALITY
+        } else {
+            CONVERT_JPEG_QUALITY
+        };
+
         let (final_bytes, final_format, final_filename) =
-            encode_resized(&resized, out_format, &out_filename)?;
+            encode_resized(&image_to_encode, target_format, &img.filename, jpeg_quality)?;
 
         entries.push(UpEntry {
             filename: final_filename,
@@ -611,10 +645,15 @@ pub fn resize_ims_file(filepath: &str, max_edge: u32) -> Result<ResizeOutcome, S
             bytes: final_bytes,
             is_cover: img.is_cover,
         });
-        resized_count += 1;
+        if oversized {
+            resized_count += 1;
+        }
+        if convert_to_jpeg && !is_jpeg {
+            converted_count += 1;
+        }
     }
 
-    if resized_count == 0 {
+    if resized_count == 0 && converted_count == 0 {
         return Ok(ResizeOutcome::Skipped);
     }
 
@@ -633,6 +672,7 @@ pub fn resize_ims_file(filepath: &str, max_edge: u32) -> Result<ResizeOutcome, S
 
     Ok(ResizeOutcome::Resized {
         sub_images_resized: resized_count,
+        sub_images_converted: converted_count,
     })
 }
 
@@ -645,15 +685,26 @@ fn with_png_extension(filename: &str) -> String {
     format!("{}.png", stem)
 }
 
-/// 将缩小后的 `DynamicImage` 按目标格式编码。
+/// 将文件名的扩展名替换为 `.jpg`（用于子图转 JPEG 后的命名）。
+fn with_jpg_extension(filename: &str) -> String {
+    let stem = Path::new(filename)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("image");
+    format!("{}.jpg", stem)
+}
+
+/// 将 `DynamicImage` 按目标格式编码。
 ///
-/// - JPEG(0)：若带 alpha 先合成到白底，再用 `JpegEncoder` q88 编码
-/// - PNG(1)：直接 `write_to` PNG（保留 alpha）
-/// - 其余格式统一按 PNG 编码（与现有 WebP/AVIF→PNG 惯例一致）
+/// - JPEG(0)：若带 alpha 先合成到白底，再用 `JpegEncoder` 以 `jpeg_quality` 编码；
+///   扩展名改为 `.jpg`
+/// - PNG(1)：直接 `write_to` PNG（保留 alpha）；扩展名改为 `.png`
+/// - 其余 `out_format` 值统一按 PNG 编码（与现有 WebP/AVIF→PNG 惯例一致）
 fn encode_resized(
     image: &image::DynamicImage,
     out_format: u8,
     out_filename: &str,
+    jpeg_quality: u8,
 ) -> Result<(Vec<u8>, u8, String), String> {
     match out_format {
         0 => {
@@ -665,10 +716,10 @@ fn encode_resized(
             };
             let (w, h) = (rgb.width(), rgb.height());
             let mut bytes = Vec::new();
-            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, RESIZE_JPEG_QUALITY)
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, jpeg_quality)
                 .encode(rgb.as_raw(), w, h, image::ExtendedColorType::Rgb8)
                 .map_err(|e| format!("JPEG 编码 {} 失败: {}", out_filename, e))?;
-            Ok((bytes, 0u8, out_filename.to_string()))
+            Ok((bytes, 0u8, with_jpg_extension(out_filename)))
         }
         _ => {
             // PNG（含原 PNG 与 AVIF 转码）
