@@ -1222,6 +1222,7 @@ function collectResizeConfig() {
     folders,
     max_edge: maxEdge,
     multi_threaded: $('#chk-resize-multi').checked,
+    convert_to_jpeg: $('#chk-resize-to-jpeg').checked,
   };
 }
 
