@@ -1311,6 +1311,16 @@ async fn start_batch_upgrade(
     Ok(total_msg)
 }
 
+/// 生成单文件调整结果的进度摘要（缩小 N 张 / 转 JPEG M 张）。
+fn resize_summary(resized: usize, converted: usize) -> String {
+    match (resized, converted) {
+        (r, 0) if r > 0 => format!("缩小 {} 张子图", r),
+        (0, c) if c > 0 => format!("转 JPEG {} 张子图", c),
+        (r, c) if r > 0 && c > 0 => format!("缩小 {} 张, 转 JPEG {} 张", r, c),
+        _ => "无变化".to_string(),
+    }
+}
+
 #[tauri::command]
 async fn start_batch_resize(
     app: tauri::AppHandle,
@@ -1349,6 +1359,7 @@ async fn start_batch_resize(
 
     let app_handle = app.clone();
     let max_edge = config.max_edge;
+    let convert_to_jpeg = config.convert_to_jpeg;
 
     std::thread::spawn(move || {
         let result = if config.multi_threaded {
@@ -1364,12 +1375,17 @@ async fn start_batch_resize(
                     .and_then(|n| n.to_str())
                     .unwrap_or(fp);
                 let _guard = IMS_WRITE_LOCK.lock();
-                let outcome = resize_ims_file(fp, max_edge);
+                let outcome = resize_ims_file(fp, max_edge, convert_to_jpeg);
                 let message = match &outcome {
-                    Ok(ResizeOutcome::Resized { sub_images_resized }) => {
-                        format!("已调整 {} (缩小 {} 张子图)", fname, sub_images_resized)
-                    }
-                    Ok(ResizeOutcome::Skipped) => format!("跳过 {} (无子图超标)", fname),
+                    Ok(ResizeOutcome::Resized {
+                        sub_images_resized,
+                        sub_images_converted,
+                    }) => format!(
+                        "已调整 {} ({})",
+                        fname,
+                        resize_summary(*sub_images_resized, *sub_images_converted)
+                    ),
+                    Ok(ResizeOutcome::Skipped) => format!("跳过 {} (无需处理)", fname),
                     Err(e) => format!("失败 {}: {}", fname, e),
                 };
                 if outcome.is_err() {
@@ -1408,12 +1424,17 @@ async fn start_batch_resize(
                     .and_then(|n| n.to_str())
                     .unwrap_or(fp);
                 let _guard = IMS_WRITE_LOCK.lock();
-                let outcome = resize_ims_file(fp, max_edge);
+                let outcome = resize_ims_file(fp, max_edge, convert_to_jpeg);
                 let message = match &outcome {
-                    Ok(ResizeOutcome::Resized { sub_images_resized }) => {
-                        format!("已调整 {} (缩小 {} 张子图)", fname, sub_images_resized)
-                    }
-                    Ok(ResizeOutcome::Skipped) => format!("跳过 {} (无子图超标)", fname),
+                    Ok(ResizeOutcome::Resized {
+                        sub_images_resized,
+                        sub_images_converted,
+                    }) => format!(
+                        "已调整 {} ({})",
+                        fname,
+                        resize_summary(*sub_images_resized, *sub_images_converted)
+                    ),
+                    Ok(ResizeOutcome::Skipped) => format!("跳过 {} (无需处理)", fname),
                     Err(e) => format!("失败 {}: {}", fname, e),
                 };
                 if outcome.is_err() {
