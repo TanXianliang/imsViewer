@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
 use tauri::Emitter;
+use tauri::Manager;
 
 mod dedup;
 mod ims;
@@ -24,9 +25,10 @@ use ims::{
     FolderEntry, SaveImagePayload, SubImagePayload,
 };
 use ims_pack::{
-    compute_output_path, load_image_as_entry, pack_ims, save_ims_entries_atomic, scan_ims_files,
-    scan_multiple_folders, scan_multiple_folders_with_options, upgrade_ims_file, BatchConfig,
-    BatchExtractConfig, ImageGroup, ProgressPayload, UpEntry,
+    compute_output_path, load_image_as_entry, pack_ims, resize_ims_file, save_ims_entries_atomic,
+    scan_ims_files, scan_multiple_folders, scan_multiple_folders_with_options, upgrade_ims_file,
+    BatchConfig, BatchExtractConfig, BatchResizeConfig, ImageGroup, ProgressPayload,
+    ResizeOutcome, UpEntry,
 };
 
 /// IMS 解析缓存：避免对同一文件反复调用 parse_ims（读取索引区）。
@@ -1309,6 +1311,167 @@ async fn start_batch_upgrade(
     Ok(total_msg)
 }
 
+#[tauri::command]
+async fn start_batch_resize(
+    app: tauri::AppHandle,
+    config: BatchResizeConfig,
+) -> Result<String, String> {
+    if config.max_edge < 64 {
+        return Err("最长边分辨率不能小于 64".into());
+    }
+
+    // 扫描所有文件夹的 IMS 文件并按路径去重（保留顺序）
+    let mut files: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for folder in &config.folders {
+        for fp in scan_ims_files(&folder.path, folder.depth) {
+            if seen.insert(fp.clone()) {
+                files.push(fp);
+            }
+        }
+    }
+    let total = files.len() as u32;
+
+    if total == 0 {
+        return Err("未发现 IMS 文件".into());
+    }
+
+    let total_msg = format!("共发现 {} 个 IMS 文件", total);
+    let _ = app.emit(
+        "batch-progress",
+        ProgressPayload {
+            current: 0,
+            total,
+            message: total_msg.clone(),
+            status: "running".into(),
+        },
+    );
+
+    let app_handle = app.clone();
+    let max_edge = config.max_edge;
+
+    std::thread::spawn(move || {
+        let result = if config.multi_threaded {
+            use rayon::prelude::*;
+            use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+            let completed = AtomicU32::new(0);
+            let has_error = AtomicBool::new(false);
+
+            files.par_iter().for_each(|fp| {
+                let fname = Path::new(fp)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(fp);
+                let _guard = IMS_WRITE_LOCK.lock();
+                let outcome = resize_ims_file(fp, max_edge);
+                let message = match &outcome {
+                    Ok(ResizeOutcome::Resized { sub_images_resized }) => {
+                        format!("已调整 {} (缩小 {} 张子图)", fname, sub_images_resized)
+                    }
+                    Ok(ResizeOutcome::Skipped) => format!("跳过 {} (无子图超标)", fname),
+                    Err(e) => format!("失败 {}: {}", fname, e),
+                };
+                if outcome.is_err() {
+                    has_error.store(true, Ordering::SeqCst);
+                } else {
+                    // 成功重写后失效 ImsCache
+                    if let Some(cache) = app_handle.try_state::<ImsCache>() {
+                        if let Ok(mut map) = cache.0.lock() {
+                            map.remove(fp);
+                        }
+                    }
+                }
+                let current = completed.fetch_add(1, Ordering::SeqCst) + 1;
+                let _ = app_handle.emit(
+                    "batch-progress",
+                    ProgressPayload {
+                        current,
+                        total,
+                        message,
+                        status: "running".into(),
+                    },
+                );
+            });
+
+            if has_error.load(Ordering::SeqCst) {
+                Err("有文件处理失败".into())
+            } else {
+                Ok(())
+            }
+        } else {
+            let mut completed: u32 = 0;
+            let mut has_error = false;
+            for fp in &files {
+                let fname = Path::new(fp)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(fp);
+                let _guard = IMS_WRITE_LOCK.lock();
+                let outcome = resize_ims_file(fp, max_edge);
+                let message = match &outcome {
+                    Ok(ResizeOutcome::Resized { sub_images_resized }) => {
+                        format!("已调整 {} (缩小 {} 张子图)", fname, sub_images_resized)
+                    }
+                    Ok(ResizeOutcome::Skipped) => format!("跳过 {} (无子图超标)", fname),
+                    Err(e) => format!("失败 {}: {}", fname, e),
+                };
+                if outcome.is_err() {
+                    has_error = true;
+                } else if let ResizeOutcome::Resized { .. } = outcome.unwrap() {
+                    if let Some(cache) = app_handle.try_state::<ImsCache>() {
+                        if let Ok(mut map) = cache.0.lock() {
+                            map.remove(fp);
+                        }
+                    }
+                }
+                completed += 1;
+                let _ = app_handle.emit(
+                    "batch-progress",
+                    ProgressPayload {
+                        current: completed,
+                        total,
+                        message,
+                        status: "running".into(),
+                    },
+                );
+            }
+            if has_error {
+                Err("有文件处理失败".into())
+            } else {
+                Ok(())
+            }
+        };
+
+        match result {
+            Ok(()) => {
+                let _ = app_handle.emit(
+                    "batch-progress",
+                    ProgressPayload {
+                        current: total,
+                        total,
+                        message: format!("全部完成，共 {} 个文件", total),
+                        status: "completed".into(),
+                    },
+                );
+            }
+            Err(e) => {
+                let _ = app_handle.emit(
+                    "batch-progress",
+                    ProgressPayload {
+                        current: total,
+                        total,
+                        message: e,
+                        status: "error".into(),
+                    },
+                );
+            }
+        }
+    });
+
+    Ok(total_msg)
+}
+
 /// 批量转换：扫描文件夹，按命名规范分组并打包为 IMS 文件
 #[tauri::command]
 async fn start_batch_convert(app: tauri::AppHandle, config: BatchConfig) -> Result<String, String> {
@@ -1573,6 +1736,7 @@ pub fn run(launch_file: Option<String>) {
             start_batch_extract,
             start_batch_convert,
             start_batch_upgrade,
+            start_batch_resize,
             register_file_associations,
             get_launch_file,
             refresh_folder,
