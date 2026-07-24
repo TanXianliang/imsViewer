@@ -165,6 +165,24 @@ pub struct BatchExtractConfig {
     pub multi_threaded: bool,
 }
 
+/// 批量调整分辨率配置（从前端传入）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchResizeConfig {
+    pub folders: Vec<FolderConfig>,
+    /// 最长边像素下限 64
+    pub max_edge: u32,
+    pub multi_threaded: bool,
+}
+
+/// 单个 IMS 文件的调整结果
+#[derive(Debug, Clone)]
+pub enum ResizeOutcome {
+    /// 有子图被缩小，文件已重写；`sub_images_resized` 为被缩小的子图数
+    Resized { sub_images_resized: usize },
+    /// 全部子图未超标，文件未改动
+    Skipped,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FolderConfig {
     pub path: String,
