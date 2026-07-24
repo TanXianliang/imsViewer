@@ -27,16 +27,14 @@ struct EmbeddedThumbnail {
     crc32: u32,
 }
 
-fn create_embedded_thumbnail(source_bytes: &[u8]) -> Result<EmbeddedThumbnail, String> {
-    let decoded = image::load_from_memory(source_bytes)
-        .map_err(|error| format!("生成缩略图时解码封面失败: {}", error))?;
-    let rgba = decoded
-        .thumbnail(THUMBNAIL_MAX_SIZE, THUMBNAIL_MAX_SIZE)
-        .to_rgba8();
+/// 将带 alpha 的 RGBA 图像合成到白底并返回 RGB 图像（用于 JPEG 编码）。
+///
+/// 合成公式与 `create_embedded_thumbnail` 原有逻辑一致：
+/// `out = (src * alpha + 255 * (255 - alpha) + 127) / 255`
+fn flatten_alpha_to_rgb(rgba: image::RgbaImage) -> image::RgbImage {
     let width = rgba.width();
     let height = rgba.height();
     let mut rgb = image::RgbImage::new(width, height);
-
     for (column, row, source_pixel) in rgba.enumerate_pixels() {
         let alpha = source_pixel[3] as u16;
         let target_pixel = rgb.get_pixel_mut(column, row);
@@ -46,6 +44,23 @@ fn create_embedded_thumbnail(source_bytes: &[u8]) -> Result<EmbeddedThumbnail, S
                 ((source_channel * alpha + 255 * (255 - alpha) + 127) / 255) as u8;
         }
     }
+    rgb
+}
+
+/// 解码 AVIF 字节为 `DynamicImage`（`image` crate 未启用 avif 特性时的专用路径）。
+fn decode_avif(bytes: &[u8]) -> Result<image::DynamicImage, String> {
+    avif::decode(bytes).map_err(|error| error.to_string())
+}
+
+fn create_embedded_thumbnail(source_bytes: &[u8]) -> Result<EmbeddedThumbnail, String> {
+    let decoded = image::load_from_memory(source_bytes)
+        .map_err(|error| format!("生成缩略图时解码封面失败: {}", error))?;
+    let rgba = decoded
+        .thumbnail(THUMBNAIL_MAX_SIZE, THUMBNAIL_MAX_SIZE)
+        .to_rgba8();
+    let width = rgba.width();
+    let height = rgba.height();
+    let rgb = flatten_alpha_to_rgb(rgba);
 
     let mut bytes = Vec::new();
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, THUMBNAIL_JPEG_QUALITY)
