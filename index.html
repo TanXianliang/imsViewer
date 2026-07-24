@@ -51,6 +51,7 @@
             <div class="menu-action" data-action="batch-extract">批量解压 IMS...</div>
             <div class="menu-action" data-action="batch-convert">批量转换...</div>
             <div class="menu-action" data-action="batch-upgrade">批量升级 IMS 版本...</div>
+            <div class="menu-action" data-action="batch-resize">批量调整分辨率...</div>
             <div class="menu-separator"></div>
             <div class="menu-action" data-action="image-dedup">图片查重...</div>
             <div class="menu-separator"></div>
@@ -381,6 +382,37 @@
       <div class="modal-footer">
         <button id="btn-start-upgrade" class="btn-primary">开始升级</button>
         <button id="btn-cancel-upgrade" class="btn-secondary">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 批量调整分辨率模态框 -->
+  <div id="resize-modal" class="modal-overlay" style="display:none">
+    <div class="modal-container">
+      <div class="modal-header">
+        <span>批量调整 IMS 子图分辨率</span>
+        <button class="btn-modal-close" id="btn-resize-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="resize-folder-list"></div>
+        <button id="btn-resize-add-folder" class="btn-secondary">+ 添加文件夹</button>
+        <div class="output-dir-row">
+          <label>最长边分辨率 (px)</label>
+          <input class="depth-input" id="resize-max-edge" type="number" min="64" value="2560" title="仅缩小最长边超过此值的子图，保持长宽比；不放大" />
+        </div>
+        <div class="modal-options">
+          <label><input type="checkbox" id="chk-resize-multi"> 多线程</label>
+        </div>
+        <div class="progress-section">
+          <div class="progress-bar-container">
+            <div class="progress-bar-fill" id="resize-progress-fill"></div>
+          </div>
+          <div class="progress-text" id="resize-progress-text">准备就绪</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-start-resize" class="btn-primary">开始调整</button>
+        <button id="btn-cancel-resize" class="btn-secondary">关闭</button>
       </div>
     </div>
   </div>
