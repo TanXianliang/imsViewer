@@ -19,6 +19,7 @@ const THUMBNAIL_VERSION: u16 = 1;
 const THUMBNAIL_FORMAT_JPEG: u8 = 0;
 const THUMBNAIL_MAX_SIZE: u32 = 160;
 const THUMBNAIL_JPEG_QUALITY: u8 = 60;
+const RESIZE_JPEG_QUALITY: u8 = 88;
 
 struct EmbeddedThumbnail {
     bytes: Vec<u8>,
@@ -550,6 +551,139 @@ pub fn upgrade_ims_file(filepath: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// 就地调整 IMS 文件中子图的分辨率。
+///
+/// 逐子图判断：若子图原始最长边 `> max_edge`，按保持长宽比缩小到最长边等于
+/// `max_edge`（`Lanczos3`）并重新编码；未超标子图保留原始字节不重编码。
+/// AVIF 子图用 `avif` 解码后转 PNG 重新编码。只要任一子图被缩小，整个
+/// IMS 文件会通过临时文件 + rename 原子重写；若全部子图未超标返回 `Skipped`。
+/// 任一子图解码/编码失败则整文件跳过（返回 `Err`，原文件保持完好）。
+pub fn resize_ims_file(filepath: &str, max_edge: u32) -> Result<ResizeOutcome, String> {
+    use crate::ims::{parse_ims, read_sub_image};
+
+    let ims_info = parse_ims(filepath)?;
+
+    let mut entries: Vec<UpEntry> = Vec::with_capacity(ims_info.images.len());
+    let mut resized_count: usize = 0;
+
+    for img in &ims_info.images {
+        let bytes = read_sub_image(filepath, img.data_offset, img.data_length)?;
+
+        // 解码：AVIF 走 avif crate，其余走 image crate
+        let (decoded, out_format, out_filename) = if img.format == 3 {
+            // AVIF → 解码后转 PNG
+            let d = decode_avif(&bytes)
+                .map_err(|e| format!("解码 AVIF 子图 {} 失败: {}", img.filename, e))?;
+            let new_name = with_png_extension(&img.filename);
+            (d, 1u8, new_name)
+        } else {
+            let d = image::load_from_memory(&bytes)
+                .map_err(|e| format!("解码子图 {} 失败: {}", img.filename, e))?;
+            (d, img.format, img.filename.clone())
+        };
+
+        let longest = decoded.width().max(decoded.height());
+        if longest <= max_edge {
+            // 未超标：原样放回（保留原字节）
+            entries.push(UpEntry {
+                filename: img.filename.clone(),
+                format: img.format,
+                bytes,
+                is_cover: img.is_cover,
+            });
+            continue;
+        }
+
+        // 超标：按比例缩小（longest 对应边 = max_edge）
+        let scale = max_edge as f64 / longest as f64;
+        let new_w = std::cmp::max(1, (decoded.width() as f64 * scale).round() as u32);
+        let new_h = std::cmp::max(1, (decoded.height() as f64 * scale).round() as u32);
+        let resized = decoded
+            .resize_exact(new_w, new_h, image::imageops::FilterType::Lanczos3);
+
+        // 编码到目标格式
+        let (final_bytes, final_format, final_filename) =
+            encode_resized(&resized, out_format, &out_filename)?;
+
+        entries.push(UpEntry {
+            filename: final_filename,
+            format: final_format,
+            bytes: final_bytes,
+            is_cover: img.is_cover,
+        });
+        resized_count += 1;
+    }
+
+    if resized_count == 0 {
+        return Ok(ResizeOutcome::Skipped);
+    }
+
+    // 封面排第一
+    entries.sort_by_key(|e| !e.is_cover);
+
+    let tmp_path = format!("{}.tmp_resize", filepath);
+    write_ims_entries(&tmp_path, &entries)
+        .map_err(|e| {
+            // 清理失败的临时文件
+            let _ = std::fs::remove_file(&tmp_path);
+            e
+        })?;
+    std::fs::remove_file(filepath).map_err(|e| format!("删除旧文件失败: {}", e))?;
+    std::fs::rename(&tmp_path, filepath).map_err(|e| format!("替换文件失败: {}", e))?;
+
+    Ok(ResizeOutcome::Resized {
+        sub_images_resized: resized_count,
+    })
+}
+
+/// 将文件名的扩展名替换为 `.png`（用于 AVIF 子图转 PNG 后的命名）。
+fn with_png_extension(filename: &str) -> String {
+    let stem = Path::new(filename)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("image");
+    format!("{}.png", stem)
+}
+
+/// 将缩小后的 `DynamicImage` 按目标格式编码。
+///
+/// - JPEG(0)：若带 alpha 先合成到白底，再用 `JpegEncoder` q88 编码
+/// - PNG(1)：直接 `write_to` PNG（保留 alpha）
+/// - 其余格式统一按 PNG 编码（与现有 WebP/AVIF→PNG 惯例一致）
+fn encode_resized(
+    image: &image::DynamicImage,
+    out_format: u8,
+    out_filename: &str,
+) -> Result<(Vec<u8>, u8, String), String> {
+    match out_format {
+        0 => {
+            // JPEG：无 alpha 支持，先 flatten
+            let rgb = if matches!(image.color(), image::ColorType::Rgba8) {
+                flatten_alpha_to_rgb(image.to_rgba8())
+            } else {
+                image.to_rgb8()
+            };
+            let (w, h) = (rgb.width(), rgb.height());
+            let mut bytes = Vec::new();
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, RESIZE_JPEG_QUALITY)
+                .encode(rgb.as_raw(), w, h, image::ExtendedColorType::Rgb8)
+                .map_err(|e| format!("JPEG 编码 {} 失败: {}", out_filename, e))?;
+            Ok((bytes, 0u8, out_filename.to_string()))
+        }
+        _ => {
+            // PNG（含原 PNG 与 AVIF 转码）
+            let mut bytes = Vec::new();
+            image
+                .write_to(
+                    &mut std::io::Cursor::new(&mut bytes),
+                    image::ImageFormat::Png,
+                )
+                .map_err(|e| format!("PNG 编码 {} 失败: {}", out_filename, e))?;
+            Ok((bytes, 1u8, with_png_extension(out_filename)))
+        }
+    }
+}
+
 /// 扫描目录中所有 IMS 文件
 pub fn scan_ims_files(dir: &str, max_depth: u32) -> Vec<String> {
     let mut walker = walkdir::WalkDir::new(dir);
@@ -837,6 +971,8 @@ pub fn compute_output_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ims::{parse_ims, read_sub_image};
+    use tempfile::tempdir;
 
     fn group_in(source_dir: &str) -> ImageGroup {
         ImageGroup {
@@ -902,5 +1038,100 @@ mod tests {
         assert_eq!(thumbnail.crc32, crc32fast::hash(&thumbnail.bytes));
         assert!(thumbnail.width <= THUMBNAIL_MAX_SIZE as u16);
         assert!(thumbnail.height <= THUMBNAIL_MAX_SIZE as u16);
+    }
+
+    /// 构造一个含指定子图的 IMS 临时文件，返回 (临时目录, ims 路径)。
+    fn make_ims_with_sub_images(sub_images: &[(u32, u32, u8)]) -> (tempfile::TempDir, String) {
+        // sub_images: [(width, height, format)]，format 0=JPEG,1=PNG
+        let dir = tempdir().unwrap();
+        let mut entries: Vec<UpEntry> = Vec::new();
+        for (i, &(w, h, fmt)) in sub_images.iter().enumerate() {
+            let img = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+                w, h, image::Rgb([100, 120, 140]),
+            ));
+            let mut bytes = Vec::new();
+            let (ext, format_byte) = if fmt == 0 {
+                img.write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Jpeg)
+                    .unwrap();
+                ("jpg", 0u8)
+            } else {
+                img.write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+                    .unwrap();
+                ("png", 1u8)
+            };
+            let filename = if i == 0 {
+                format!("cover.{}", ext)
+            } else {
+                format!("cover_{:05}_.{}", i, ext)
+            };
+            entries.push(UpEntry {
+                filename,
+                format: format_byte,
+                bytes,
+                is_cover: i == 0,
+            });
+        }
+        let ims_path = dir.path().join("test.ims.jpg").to_string_lossy().to_string();
+        // 用 write_ims_entries 写出 IMS 容器
+        write_ims_entries(&ims_path, &entries).unwrap();
+        (dir, ims_path)
+    }
+
+    #[test]
+    fn resize_skips_when_all_sub_images_within_max_edge() {
+        let (_dir, ims_path) = make_ims_with_sub_images(&[(100, 100, 0)]);
+        let original_bytes = std::fs::read(&ims_path).unwrap();
+        let outcome = resize_ims_file(&ims_path, 200).unwrap();
+        assert!(matches!(outcome, ResizeOutcome::Skipped));
+        // 文件字节未变
+        assert_eq!(std::fs::read(&ims_path).unwrap(), original_bytes);
+    }
+
+    #[test]
+    fn resize_resizes_oversized_jpeg_and_preserves_aspect() {
+        let (_dir, ims_path) = make_ims_with_sub_images(&[(800, 600, 0)]);
+        let outcome = resize_ims_file(&ims_path, 400).unwrap();
+        match outcome {
+            ResizeOutcome::Resized { sub_images_resized } => assert_eq!(sub_images_resized, 1),
+            _ => panic!("expected Resized"),
+        }
+        let info = parse_ims(&ims_path).unwrap();
+        let sub = read_sub_image(&ims_path, info.images[0].data_offset, info.images[0].data_length)
+            .unwrap();
+        let decoded = image::load_from_memory(&sub).unwrap();
+        // 800×600 → longest=800 → scale=0.5 → 400×300
+        assert_eq!((decoded.width(), decoded.height()), (400, 300));
+    }
+
+    #[test]
+    fn resize_preserves_undersized_sub_image_bytes() {
+        // 两张子图：800×600 超标 + 100×100 未超标
+        let (_dir, ims_path) = make_ims_with_sub_images(&[(800, 600, 0), (100, 100, 1)]);
+        // 记录未超标子图的原始字节（index 1）
+        let info_before = parse_ims(&ims_path).unwrap();
+        let small_before =
+            read_sub_image(&ims_path, info_before.images[1].data_offset, info_before.images[1].data_length)
+                .unwrap();
+        resize_ims_file(&ims_path, 400).unwrap();
+        // 重写后重新解析，未超标子图字节应与原始一致
+        let info_after = parse_ims(&ims_path).unwrap();
+        let small_after =
+            read_sub_image(&ims_path, info_after.images[1].data_offset, info_after.images[1].data_length)
+                .unwrap();
+        assert_eq!(small_before, small_after);
+    }
+
+    #[test]
+    fn resize_returns_err_on_corrupt_sub_image() {
+        let (_dir, ims_path) = make_ims_with_sub_images(&[(800, 600, 0)]);
+        // 破坏文件：把封面字节区改坏（在数据区写垃圾）
+        let mut data = std::fs::read(&ims_path).unwrap();
+        // 向数据区前 100 字节写垃圾（保留尾部索引，使 parse_ims 仍成功但解码失败）
+        for b in &mut data[0..100] {
+            *b = 0xFF;
+        }
+        std::fs::write(&ims_path, &data).unwrap();
+        let result = resize_ims_file(&ims_path, 400);
+        assert!(result.is_err(), "corrupt sub-image should error whole file");
     }
 }
