@@ -1023,6 +1023,7 @@ pub fn compute_output_path(
 mod tests {
     use super::*;
     use crate::ims::{parse_ims, read_sub_image};
+    use image::ImageEncoder;
     use tempfile::tempdir;
 
     fn group_in(source_dir: &str) -> ImageGroup {
@@ -1365,5 +1366,149 @@ mod tests {
             image::ColorType::Rgba8,
             "转 JPEG 后 alpha 应被合成"
         );
+    }
+
+    /// 构造一个含 JPEG 封面 + 单张 AVIF 子图的 IMS，返回 (临时目录, ims 路径)。
+    /// 封面用 JPEG 是因为 `create_embedded_thumbnail` 走 `image::load_from_memory`，
+    /// 当前 `image` crate 未启用 avif 特性，无法从 AVIF 字节生成缩略图。
+    fn make_ims_jpeg_cover_with_avif_sub(
+        cover_w: u32,
+        cover_h: u32,
+        avif_w: u32,
+        avif_h: u32,
+    ) -> (tempfile::TempDir, String) {
+        let dir = tempdir().unwrap();
+
+        // JPEG 封面
+        let cover_img = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            cover_w,
+            cover_h,
+            image::Rgb([200, 100, 50]),
+        ));
+        let mut cover_bytes = Vec::new();
+        cover_img
+            .write_to(
+                &mut std::io::Cursor::new(&mut cover_bytes),
+                image::ImageFormat::Jpeg,
+            )
+            .unwrap();
+
+        // AVIF 子图
+        let avif_img = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            avif_w,
+            avif_h,
+            image::Rgb([100, 120, 140]),
+        ));
+        let rgba = avif_img.to_rgba8();
+        let mut avif_bytes = Vec::new();
+        image::codecs::avif::AvifEncoder::new_with_speed_quality(&mut avif_bytes, 10, 100)
+            .write_image(
+                rgba.as_raw(),
+                rgba.width(),
+                rgba.height(),
+                image::ExtendedColorType::Rgba8,
+            )
+            .unwrap();
+
+        let entries = vec![
+            UpEntry {
+                filename: "cover.jpg".into(),
+                format: 0u8,
+                bytes: cover_bytes,
+                is_cover: true,
+            },
+            UpEntry {
+                filename: "sub.avif".into(),
+                format: 3u8,
+                bytes: avif_bytes,
+                is_cover: false,
+            },
+        ];
+        let ims_path = dir
+            .path()
+            .join("test.ims.avif")
+            .to_string_lossy()
+            .to_string();
+        write_ims_entries(&ims_path, &entries).unwrap();
+        (dir, ims_path)
+    }
+
+    #[test]
+    fn convert_to_jpeg_converts_undersized_avif() {
+        // 未超标 AVIF 子图 + convert_to_jpeg=true → 转 JPEG（decode_avif 路径）
+        let (_dir, ims_path) = make_ims_jpeg_cover_with_avif_sub(50, 50, 100, 100);
+        let outcome = resize_ims_file(&ims_path, 400, true).unwrap();
+        match outcome {
+            ResizeOutcome::Resized {
+                sub_images_resized,
+                sub_images_converted,
+            } => {
+                assert_eq!(sub_images_resized, 0);
+                assert_eq!(sub_images_converted, 1);
+            }
+            _ => panic!("expected Resized"),
+        }
+        let info = parse_ims(&ims_path).unwrap();
+        // 找到原 AVIF 子图（非封面）
+        let avif_sub = info
+            .images
+            .iter()
+            .find(|i| !i.is_cover)
+            .expect("应有非封面子图");
+        assert_eq!(avif_sub.format, 0, "AVIF 应转为 JPEG");
+        assert!(avif_sub.filename.ends_with(".jpg"));
+        let sub = read_sub_image(&ims_path, avif_sub.data_offset, avif_sub.data_length).unwrap();
+        let decoded = image::load_from_memory(&sub).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (100, 100));
+    }
+
+    /// 构造一个含单张 WebP 子图的 IMS，返回 (临时目录, ims 路径)。
+    fn make_ims_single_webp(w: u32, h: u32) -> (tempfile::TempDir, String) {
+        let dir = tempdir().unwrap();
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            w,
+            h,
+            image::Rgb([100, 120, 140]),
+        ));
+        let mut bytes = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::WebP)
+            .unwrap();
+        let entries = vec![UpEntry {
+            filename: "cover.webp".into(),
+            format: 2u8,
+            bytes,
+            is_cover: true,
+        }];
+        let ims_path = dir
+            .path()
+            .join("test.ims.webp")
+            .to_string_lossy()
+            .to_string();
+        write_ims_entries(&ims_path, &entries).unwrap();
+        (dir, ims_path)
+    }
+
+    #[test]
+    fn convert_to_jpeg_converts_undersized_webp() {
+        // 未超标 WebP + convert_to_jpeg=true → 转 JPEG
+        let (_dir, ims_path) = make_ims_single_webp(100, 100);
+        let outcome = resize_ims_file(&ims_path, 400, true).unwrap();
+        match outcome {
+            ResizeOutcome::Resized {
+                sub_images_resized,
+                sub_images_converted,
+            } => {
+                assert_eq!(sub_images_resized, 0);
+                assert_eq!(sub_images_converted, 1);
+            }
+            _ => panic!("expected Resized"),
+        }
+        let info = parse_ims(&ims_path).unwrap();
+        assert_eq!(info.images[0].format, 0, "WebP 应转为 JPEG");
+        assert!(info.images[0].filename.ends_with(".jpg"));
+        let sub = read_sub_image(&ims_path, info.images[0].data_offset, info.images[0].data_length)
+            .unwrap();
+        let decoded = image::load_from_memory(&sub).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (100, 100));
     }
 }
