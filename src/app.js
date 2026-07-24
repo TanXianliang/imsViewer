@@ -926,6 +926,9 @@ function setupMenuActions() {
         case 'batch-upgrade':
           openUpgradeModal();
           break;
+        case 'batch-resize':
+          openResizeModal();
+          break;
         case 'image-dedup':
           window.dispatchEvent(new CustomEvent('imsviewer:open-dedup'));
           break;
@@ -1159,6 +1162,118 @@ function setupBatchEvents() {
   };
   // 默认添加一行空文件夹
   if ($('#folder-list').children.length === 0) addFolderRow();
+}
+
+// ===== 批量调整分辨率模态框 =====
+let resizeUnlisten = null;
+
+function openResizeModal() {
+  const modal = $('#resize-modal');
+  modal.style.display = 'flex';
+  $('#resize-folder-list').innerHTML = '';
+  addResizeFolderRow();
+  $('#resize-max-edge').value = '2560';
+  $('#resize-progress-fill').style.width = '0%';
+  $('#resize-progress-text').textContent = '准备就绪';
+  $('#btn-start-resize').disabled = false;
+  $('#btn-start-resize').textContent = '开始调整';
+  setupResizeEvents();
+}
+
+function closeResizeModal() {
+  $('#resize-modal').style.display = 'none';
+  if (resizeUnlisten) {
+    resizeUnlisten();
+    resizeUnlisten = null;
+  }
+}
+
+function addResizeFolderRow(path = '', depth = 0) {
+  const row = document.createElement('div');
+  row.className = 'folder-row';
+  row.innerHTML = `
+    <input class="path-input" type="text" placeholder="文件夹路径..." value="${escapeHtml(path)}" />
+    <button class="btn-browse">浏览</button>
+    <label title="0=无限深度">深度 <input class="depth-input" type="number" min="0" max="100" value="${depth}" /></label>
+    <button class="btn-remove" title="移除">×</button>
+  `;
+  row.querySelector('.btn-browse').addEventListener('click', async () => {
+    try {
+      const dir = await invoke('pick_folder');
+      if (dir) row.querySelector('.path-input').value = dir;
+    } catch (e) { console.error('选择文件夹失败:', e); }
+  });
+  row.querySelector('.btn-remove').addEventListener('click', () => {
+    row.remove();
+    if ($('#resize-folder-list').children.length === 0) addResizeFolderRow();
+  });
+  $('#resize-folder-list').appendChild(row);
+}
+
+function collectResizeConfig() {
+  const folders = [];
+  $$('#resize-folder-list .folder-row').forEach(row => {
+    const path = row.querySelector('.path-input').value.trim();
+    const depth = parseInt(row.querySelector('.depth-input').value) || 0;
+    if (path) folders.push({ path, depth: Math.min(100, Math.max(0, depth)) });
+  });
+  const maxEdge = parseInt($('#resize-max-edge').value) || 0;
+  return {
+    folders,
+    max_edge: maxEdge,
+    multi_threaded: $('#chk-resize-multi').checked,
+  };
+}
+
+async function startBatchResize() {
+  const config = collectResizeConfig();
+  if (config.folders.length === 0) {
+    alert('请至少添加一个文件夹');
+    return;
+  }
+  if (config.max_edge < 64) {
+    alert('最长边分辨率不能小于 64');
+    return;
+  }
+  if (config.max_edge > 32768) {
+    if (!confirm('最长边超过 32768，确定继续吗？')) return;
+  }
+
+  const btn = $('#btn-start-resize');
+  btn.disabled = true;
+  btn.textContent = '调整中...';
+  $('#resize-progress-text').textContent = '正在扫描 IMS 文件...';
+
+  try {
+    if (resizeUnlisten) resizeUnlisten();
+    resizeUnlisten = await listen('batch-progress', (event) => {
+      const p = event.payload;
+      const pct = p.total > 0 ? Math.round((p.current / p.total) * 100) : 0;
+      $('#resize-progress-fill').style.width = pct + '%';
+      $('#resize-progress-text').textContent = `[${p.current}/${p.total}] ${p.message}`;
+
+      if (p.status === 'completed' || p.status === 'error') {
+        btn.disabled = false;
+        btn.textContent = '开始调整';
+        $('#resize-progress-text').textContent =
+          (p.status === 'completed' ? '✅ ' : '⚠️ ') + p.message;
+      }
+    });
+
+    await invoke('start_batch_resize', { config });
+  } catch (err) {
+    alert('启动调整失败: ' + err);
+    btn.disabled = false;
+    btn.textContent = '开始调整';
+  }
+}
+
+function setupResizeEvents() {
+  $('#btn-resize-add-folder').onclick = () => addResizeFolderRow();
+  $('#btn-resize-close').onclick = () => closeResizeModal();
+  $('#btn-cancel-resize').onclick = () => closeResizeModal();
+  $('#btn-start-resize').onclick = () => startBatchResize();
+  if ($('#resize-folder-list').children.length === 0) addResizeFolderRow();
 }
 
 function escapeHtml(str) {
