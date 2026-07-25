@@ -3,6 +3,7 @@
 //! 与 Python 版 ims_pack.py + ims_batch.py 等价的 Rust 实现。
 
 use byteorder::{LittleEndian, WriteBytesExt};
+use image::ImageEncoder;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -624,7 +625,7 @@ pub fn resize_ims_file(
             let scale = max_edge as f64 / longest as f64;
             let new_w = std::cmp::max(1, (decoded.width() as f64 * scale).round() as u32);
             let new_h = std::cmp::max(1, (decoded.height() as f64 * scale).round() as u32);
-            decoded.resize_exact(new_w, new_h, image::imageops::FilterType::Lanczos3)
+            decoded.resize_exact(new_w, new_h, image::imageops::FilterType::CatmullRom)
         } else {
             decoded
         };
@@ -722,14 +723,17 @@ fn encode_resized(
             Ok((bytes, 0u8, with_jpg_extension(out_filename)))
         }
         _ => {
-            // PNG（含原 PNG 与 AVIF 转码）
+            // PNG（含原 PNG 与 AVIF 转码）：快速压缩，体积略增换数倍编码速度
             let mut bytes = Vec::new();
-            image
-                .write_to(
-                    &mut std::io::Cursor::new(&mut bytes),
-                    image::ImageFormat::Png,
-                )
-                .map_err(|e| format!("PNG 编码 {} 失败: {}", out_filename, e))?;
+            let rgba = image.to_rgba8();
+            let (w, h) = (rgba.width(), rgba.height());
+            image::codecs::png::PngEncoder::new_with_quality(
+                &mut bytes,
+                image::codecs::png::CompressionType::Fast,
+                image::codecs::png::FilterType::Adaptive,
+            )
+            .write_image(rgba.as_raw(), w, h, image::ExtendedColorType::Rgba8)
+            .map_err(|e| format!("PNG 编码 {} 失败: {}", out_filename, e))?;
             Ok((bytes, 1u8, with_png_extension(out_filename)))
         }
     }
