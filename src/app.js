@@ -1166,9 +1166,20 @@ function setupMenuActions() {
             '  (WebP/AVIF 打包时自动转 PNG)'
           );
           break;
-        case 'about':
-          alert('imsViewer v1.0\nIMS 图片浏览器\n基于 Tauri v2 + Rust + Canvas');
+        case 'check-update':
+          checkForUpdates(true);
           break;
+        case 'about': {
+          const skipped = getSkippedVersion();
+          let aboutText = 'imsViewer v' + (window.__imsVersion || '1.2.1') + '\n';
+          aboutText += 'IMS 图片浏览器\n基于 Tauri v2 + Rust + Canvas';
+          if (skipped) {
+            aboutText += '\n\n已跳过版本: v' + skipped;
+            aboutText += '\n(点击"检查更新"可恢复提示)';
+          }
+          alert(aboutText);
+          break;
+        }
       }
     });
   });
