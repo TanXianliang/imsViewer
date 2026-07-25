@@ -1174,6 +1174,8 @@ function openResizeModal() {
   $('#resize-folder-list').innerHTML = '';
   addResizeFolderRow();
   $('#resize-max-edge').value = '2560';
+  $('#chk-resize-enable').checked = true;
+  $('#resize-max-edge').disabled = false;
   $('#resize-progress-fill').style.width = '0%';
   $('#resize-progress-text').textContent = '准备就绪';
   $('#btn-start-resize').disabled = false;
@@ -1224,6 +1226,7 @@ function collectResizeConfig() {
     max_edge: maxEdge,
     multi_threaded: $('#chk-resize-multi').checked,
     convert_to_jpeg: $('#chk-resize-to-jpeg').checked,
+    enable_resize: $('#chk-resize-enable').checked,
   };
 }
 
@@ -1233,11 +1236,15 @@ async function startBatchResize() {
     alert('请至少添加一个文件夹');
     return;
   }
-  if (config.max_edge < 64) {
+  if (!config.enable_resize && !config.convert_to_jpeg) {
+    alert('请至少勾选一个操作：调整分辨率或转为 JPEG');
+    return;
+  }
+  if (config.enable_resize && config.max_edge < 64) {
     alert('最长边分辨率不能小于 64');
     return;
   }
-  if (config.max_edge > 32768) {
+  if (config.enable_resize && config.max_edge > 32768) {
     if (!confirm('最长边超过 32768，确定继续吗？')) return;
   }
 
@@ -1275,6 +1282,9 @@ function setupResizeEvents() {
   $('#btn-resize-close').onclick = () => closeResizeModal();
   $('#btn-cancel-resize').onclick = () => closeResizeModal();
   $('#btn-start-resize').onclick = () => startBatchResize();
+  $('#chk-resize-enable').onchange = () => {
+    $('#resize-max-edge').disabled = !$('#chk-resize-enable').checked;
+  };
   if ($('#resize-folder-list').children.length === 0) addResizeFolderRow();
 }
 
