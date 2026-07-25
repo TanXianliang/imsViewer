@@ -1106,6 +1106,7 @@ function collectBatchConfig() {
     output_dir: outputDir || null,
     preserve_structure: $('#chk-preserve-structure').checked,
     merge_existing_ims: $('#chk-merge-existing-ims').checked,
+    sub_images_to_jpeg: $('#chk-sub-to-jpeg').checked,
   };
 }
 
