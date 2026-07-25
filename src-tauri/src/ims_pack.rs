@@ -1174,7 +1174,7 @@ mod tests {
     fn resize_skips_when_all_sub_images_within_max_edge() {
         let (_dir, ims_path) = make_ims_with_sub_images(&[(100, 100, 0)]);
         let original_bytes = std::fs::read(&ims_path).unwrap();
-        let outcome = resize_ims_file(&ims_path, 200, false).unwrap();
+        let outcome = resize_ims_file(&ims_path, 200, false, true).unwrap();
         assert!(matches!(outcome, ResizeOutcome::Skipped));
         // 文件字节未变
         assert_eq!(std::fs::read(&ims_path).unwrap(), original_bytes);
@@ -1183,7 +1183,7 @@ mod tests {
     #[test]
     fn resize_resizes_oversized_jpeg_and_preserves_aspect() {
         let (_dir, ims_path) = make_ims_with_sub_images(&[(800, 600, 0)]);
-        let outcome = resize_ims_file(&ims_path, 400, false).unwrap();
+        let outcome = resize_ims_file(&ims_path, 400, false, true).unwrap();
         match outcome {
             ResizeOutcome::Resized { sub_images_resized, .. } => assert_eq!(sub_images_resized, 1),
             _ => panic!("expected Resized"),
@@ -1205,7 +1205,7 @@ mod tests {
         let small_before =
             read_sub_image(&ims_path, info_before.images[1].data_offset, info_before.images[1].data_length)
                 .unwrap();
-        resize_ims_file(&ims_path, 400, false).unwrap();
+        resize_ims_file(&ims_path, 400, false, true).unwrap();
         // 重写后重新解析，未超标子图字节应与原始一致
         let info_after = parse_ims(&ims_path).unwrap();
         let small_after =
@@ -1224,7 +1224,7 @@ mod tests {
             *b = 0xFF;
         }
         std::fs::write(&ims_path, &data).unwrap();
-        let result = resize_ims_file(&ims_path, 400, false);
+        let result = resize_ims_file(&ims_path, 400, false, true);
         assert!(result.is_err(), "corrupt sub-image should error whole file");
     }
 
@@ -1257,7 +1257,7 @@ mod tests {
             .to_string();
         write_ims_entries(&ims_path, &entries).unwrap();
 
-        let outcome = resize_ims_file(&ims_path, 400, false).unwrap();
+        let outcome = resize_ims_file(&ims_path, 400, false, true).unwrap();
         match outcome {
             ResizeOutcome::Resized { sub_images_resized, .. } => {
                 assert_eq!(sub_images_resized, 1);
@@ -1329,7 +1329,7 @@ mod tests {
     fn convert_to_jpeg_converts_undersized_png() {
         // 未超标 PNG + convert_to_jpeg=true → 转 JPEG（不缩小）
         let (_dir, ims_path) = make_ims_single(1, 100, 100, false);
-        let outcome = resize_ims_file(&ims_path, 400, true).unwrap();
+        let outcome = resize_ims_file(&ims_path, 400, true, true).unwrap();
         match outcome {
             ResizeOutcome::Resized {
                 sub_images_resized,
@@ -1354,7 +1354,7 @@ mod tests {
         // 未超标 JPEG + convert_to_jpeg=true → Skipped（已是 JPEG 不二次编码）
         let (_dir, ims_path) = make_ims_single(0, 100, 100, false);
         let original = std::fs::read(&ims_path).unwrap();
-        let outcome = resize_ims_file(&ims_path, 400, true).unwrap();
+        let outcome = resize_ims_file(&ims_path, 400, true, true).unwrap();
         assert!(matches!(outcome, ResizeOutcome::Skipped));
         assert_eq!(std::fs::read(&ims_path).unwrap(), original, "文件不应改动");
     }
@@ -1363,7 +1363,7 @@ mod tests {
     fn convert_to_jpeg_oversized_png_resizes_and_converts() {
         // 超标 PNG + convert_to_jpeg=true → 缩小 + 转 JPEG
         let (_dir, ims_path) = make_ims_single(1, 800, 600, false);
-        let outcome = resize_ims_file(&ims_path, 400, true).unwrap();
+        let outcome = resize_ims_file(&ims_path, 400, true, true).unwrap();
         match outcome {
             ResizeOutcome::Resized {
                 sub_images_resized,
@@ -1387,7 +1387,7 @@ mod tests {
         // 未超标 PNG + convert_to_jpeg=false → Skipped（回归：未勾选行为不变）
         let (_dir, ims_path) = make_ims_single(1, 100, 100, false);
         let original = std::fs::read(&ims_path).unwrap();
-        let outcome = resize_ims_file(&ims_path, 400, false).unwrap();
+        let outcome = resize_ims_file(&ims_path, 400, false, true).unwrap();
         assert!(matches!(outcome, ResizeOutcome::Skipped));
         assert_eq!(std::fs::read(&ims_path).unwrap(), original);
     }
@@ -1396,7 +1396,7 @@ mod tests {
     fn convert_to_jpeg_flattens_alpha() {
         // 带 alpha 的 PNG + convert_to_jpeg=true → 转 JPEG 后无 alpha
         let (_dir, ims_path) = make_ims_single(1, 800, 600, true);
-        let outcome = resize_ims_file(&ims_path, 400, true).unwrap();
+        let outcome = resize_ims_file(&ims_path, 400, true, true).unwrap();
         assert!(matches!(outcome, ResizeOutcome::Resized { .. }));
         let info = parse_ims(&ims_path).unwrap();
         let sub = read_sub_image(&ims_path, info.images[0].data_offset, info.images[0].data_length)
@@ -1478,7 +1478,7 @@ mod tests {
     fn convert_to_jpeg_converts_undersized_avif() {
         // 未超标 AVIF 子图 + convert_to_jpeg=true → 转 JPEG（decode_avif 路径）
         let (_dir, ims_path) = make_ims_jpeg_cover_with_avif_sub(50, 50, 100, 100);
-        let outcome = resize_ims_file(&ims_path, 400, true).unwrap();
+        let outcome = resize_ims_file(&ims_path, 400, true, true).unwrap();
         match outcome {
             ResizeOutcome::Resized {
                 sub_images_resized,
@@ -1533,7 +1533,7 @@ mod tests {
     fn convert_to_jpeg_converts_undersized_webp() {
         // 未超标 WebP + convert_to_jpeg=true → 转 JPEG
         let (_dir, ims_path) = make_ims_single_webp(100, 100);
-        let outcome = resize_ims_file(&ims_path, 400, true).unwrap();
+        let outcome = resize_ims_file(&ims_path, 400, true, true).unwrap();
         match outcome {
             ResizeOutcome::Resized {
                 sub_images_resized,
@@ -1704,5 +1704,86 @@ mod tests {
         let original = std::fs::read(&jpg_path).unwrap();
         let entry = load_image_as_entry(std::path::Path::new(&jpg_path), false, true).unwrap();
         assert_eq!(entry.bytes, original, "已是 JPEG 不应二次编码");
+    }
+
+    #[test]
+    fn enable_resize_false_only_converts_jpeg() {
+        // 未超标 PNG + enable_resize=false, convert_to_jpeg=true → 转 JPEG（不缩放）
+        let (_dir, ims_path) = make_ims_single(1, 100, 100, false);
+        let outcome = resize_ims_file(&ims_path, 400, true, false).unwrap();
+        match outcome {
+            ResizeOutcome::Resized {
+                sub_images_resized,
+                sub_images_converted,
+            } => {
+                assert_eq!(sub_images_resized, 0, "enable_resize=false 不应缩放");
+                assert_eq!(sub_images_converted, 1);
+            }
+            _ => panic!("expected Resized"),
+        }
+        let info = parse_ims(&ims_path).unwrap();
+        assert_eq!(info.images[0].format, 0, "应转为 JPEG");
+        let sub = read_sub_image(&ims_path, info.images[0].data_offset, info.images[0].data_length)
+            .unwrap();
+        let decoded = image::load_from_memory(&sub).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (100, 100), "尺寸不应改变");
+    }
+
+    #[test]
+    fn enable_resize_false_oversized_png_not_resized() {
+        // 超标 PNG（800×600）+ enable_resize=false, convert_to_jpeg=true → 转 JPEG 但不缩放
+        let (_dir, ims_path) = make_ims_single(1, 800, 600, false);
+        let outcome = resize_ims_file(&ims_path, 400, true, false).unwrap();
+        match outcome {
+            ResizeOutcome::Resized {
+                sub_images_resized,
+                sub_images_converted,
+            } => {
+                assert_eq!(sub_images_resized, 0, "enable_resize=false 不应缩放");
+                assert_eq!(sub_images_converted, 1);
+            }
+            _ => panic!("expected Resized"),
+        }
+        let info = parse_ims(&ims_path).unwrap();
+        let sub = read_sub_image(&ims_path, info.images[0].data_offset, info.images[0].data_length)
+            .unwrap();
+        let decoded = image::load_from_memory(&sub).unwrap();
+        assert_eq!(
+            (decoded.width(), decoded.height()),
+            (800, 600),
+            "enable_resize=false 时尺寸不应改变（不缩放）"
+        );
+    }
+
+    #[test]
+    fn enable_resize_false_all_jpeg_skipped() {
+        // 单张 JPEG + enable_resize=false, convert_to_jpeg=true → Skipped（已是 JPEG 不二次编码）
+        let (_dir, ims_path) = make_ims_single(0, 100, 100, false);
+        let original = std::fs::read(&ims_path).unwrap();
+        let outcome = resize_ims_file(&ims_path, 400, true, false).unwrap();
+        assert!(matches!(outcome, ResizeOutcome::Skipped));
+        assert_eq!(std::fs::read(&ims_path).unwrap(), original, "文件不应改动");
+    }
+
+    #[test]
+    fn enable_resize_true_unchanged_behavior() {
+        // 超标 PNG + enable_resize=true, convert_to_jpeg=false → 缩小（回归：现有行为不变）
+        let (_dir, ims_path) = make_ims_single(1, 800, 600, false);
+        let outcome = resize_ims_file(&ims_path, 400, false, true).unwrap();
+        match outcome {
+            ResizeOutcome::Resized {
+                sub_images_resized,
+                sub_images_converted,
+            } => {
+                assert_eq!(sub_images_resized, 1);
+                assert_eq!(sub_images_converted, 0);
+            }
+            _ => panic!("expected Resized"),
+        }
+        let info = parse_ims(&ims_path).unwrap();
+        let sub = read_sub_image(&ims_path, info.images[0].data_offset, info.images[0].data_length)
+            .unwrap();
+        let decoded = image::load_from_memory(&sub).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (400, 300), "应缩小");
     }
 }
