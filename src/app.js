@@ -966,6 +966,72 @@ function showUpdateModal(update, currentVersion, latestVersion) {
   modal.style.display = 'flex';
 }
 
+async function downloadAndInstallUpdate(update, version) {
+  const progressModal = $('#update-progress-modal');
+  const completeModal = $('#update-complete-modal');
+  const progressFill = $('#update-progress-fill');
+  const progressText = $('#update-progress-text');
+  const progressVersion = $('#update-progress-version');
+  const btnCancel = $('#btn-update-cancel');
+
+  progressVersion.textContent = 'v' + version;
+  progressFill.style.width = '0%';
+  progressText.textContent = '准备下载...';
+  progressModal.style.display = 'flex';
+
+  let cancelled = false;
+  btnCancel.onclick = () => {
+    cancelled = true;
+    progressModal.style.display = 'none';
+  };
+
+  try {
+    let downloaded = 0;
+    let contentLength = 0;
+
+    await update.downloadAndInstall((event) => {
+      if (cancelled) return;
+      switch (event.event) {
+        case 'Started':
+          contentLength = event.data.contentLength || 0;
+          progressText.textContent = '开始下载...';
+          break;
+        case 'Progress':
+          downloaded += event.data.chunkLength;
+          if (contentLength > 0) {
+            const percent = Math.round((downloaded / contentLength) * 100);
+            progressFill.style.width = percent + '%';
+            progressText.textContent = `已下载 ${formatSize(downloaded)} / ${formatSize(contentLength)} (${percent}%)`;
+          } else {
+            progressText.textContent = `已下载 ${formatSize(downloaded)}`;
+          }
+          break;
+        case 'Finished':
+          progressFill.style.width = '100%';
+          progressText.textContent = '下载完成，正在安装...';
+          break;
+      }
+    });
+
+    if (cancelled) return;
+
+    progressModal.style.display = 'none';
+
+    // 显示完成弹窗
+    const btnRestart = $('#btn-update-restart');
+    btnRestart.onclick = async () => {
+      completeModal.style.display = 'none';
+      await relaunch();
+    };
+    completeModal.style.display = 'flex';
+  } catch (err) {
+    progressModal.style.display = 'none';
+    if (!cancelled) {
+      alert('更新下载失败: ' + (err.message || err));
+    }
+  }
+}
+
 // ===== 菜单栏 =====
 function setupMenuActions() {
   $$('.menu-item').forEach(item => {
