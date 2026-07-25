@@ -1543,4 +1543,104 @@ mod tests {
         let decoded = image::load_from_memory(&sub).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (100, 100));
     }
+
+    /// 在临时目录写一张指定尺寸/格式的图片文件，返回 (临时目录, 文件路径)。
+    fn write_temp_image(dir: &tempfile::TempDir, name: &str, w: u32, h: u32, rgba: bool) -> String {
+        let path = dir.path().join(name);
+        if rgba {
+            let img = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+                w, h, image::Rgba([100, 120, 140, 128]),
+            ));
+            img.save(&path).unwrap();
+        } else {
+            let img = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+                w, h, image::Rgb([100, 120, 140]),
+            ));
+            img.save(&path).unwrap();
+        }
+        path.to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn pack_ims_converts_sub_image_png_to_jpeg() {
+        let dir = tempdir().unwrap();
+        let cover = write_temp_image(&dir, "cover.jpg", 100, 100, false);
+        let sub = write_temp_image(&dir, "cover_00001_.png", 200, 200, false);
+        let output = dir.path().join("out.ims.jpg").to_string_lossy().to_string();
+        pack_ims(&[cover, sub], 0, &output, true).unwrap();
+        let info = crate::ims::parse_ims(&output).unwrap();
+        // 封面（index 0）保持 JPEG，子图（index 1）转 JPEG
+        assert_eq!(info.images[0].format, 0, "封面应保持 JPEG");
+        assert_eq!(info.images[1].format, 0, "子图应转为 JPEG");
+        assert!(info.images[1].filename.ends_with(".jpg"), "子图扩展名应为 .jpg");
+    }
+
+    #[test]
+    fn pack_ims_preserves_jpeg_sub_image_when_converting() {
+        let dir = tempdir().unwrap();
+        let cover = write_temp_image(&dir, "cover.jpg", 100, 100, false);
+        let sub = write_temp_image(&dir, "cover_00001_.jpg", 200, 200, false);
+        let sub_original = std::fs::read(&sub).unwrap();
+        let output = dir.path().join("out.ims.jpg").to_string_lossy().to_string();
+        pack_ims(&[cover, sub], 0, &output, true).unwrap();
+        let info = crate::ims::parse_ims(&output).unwrap();
+        let sub_bytes = crate::ims::read_sub_image(
+            &output,
+            info.images[1].data_offset,
+            info.images[1].data_length,
+        )
+        .unwrap();
+        assert_eq!(sub_bytes, sub_original, "已是 JPEG 的子图不应二次编码");
+    }
+
+    #[test]
+    fn pack_ims_no_convert_keeps_png_sub_image() {
+        let dir = tempdir().unwrap();
+        let cover = write_temp_image(&dir, "cover.jpg", 100, 100, false);
+        let sub = write_temp_image(&dir, "cover_00001_.png", 200, 200, false);
+        let output = dir.path().join("out.ims.png").to_string_lossy().to_string();
+        pack_ims(&[cover, sub], 0, &output, false).unwrap();
+        let info = crate::ims::parse_ims(&output).unwrap();
+        assert_eq!(info.images[1].format, 1, "未勾选时 PNG 子图应保持 PNG");
+    }
+
+    #[test]
+    fn pack_ims_convert_sub_image_flattens_alpha() {
+        let dir = tempdir().unwrap();
+        let cover = write_temp_image(&dir, "cover.jpg", 100, 100, false);
+        let sub = write_temp_image(&dir, "cover_00001_.png", 200, 200, true);
+        let output = dir.path().join("out.ims.jpg").to_string_lossy().to_string();
+        pack_ims(&[cover, sub], 0, &output, true).unwrap();
+        let info = crate::ims::parse_ims(&output).unwrap();
+        let sub_bytes = crate::ims::read_sub_image(
+            &output,
+            info.images[1].data_offset,
+            info.images[1].data_length,
+        )
+        .unwrap();
+        let decoded = image::load_from_memory(&sub_bytes).unwrap();
+        assert_ne!(
+            decoded.color(),
+            image::ColorType::Rgba8,
+            "转 JPEG 后 alpha 应被合成"
+        );
+    }
+
+    #[test]
+    fn load_image_as_entry_to_jpeg_converts_png() {
+        let dir = tempdir().unwrap();
+        let png_path = write_temp_image(&dir, "img.png", 100, 100, false);
+        let entry = load_image_as_entry(std::path::Path::new(&png_path), false, true).unwrap();
+        assert_eq!(entry.format, 0, "应转为 JPEG");
+        assert!(entry.filename.ends_with(".jpg"), "扩展名应为 .jpg");
+    }
+
+    #[test]
+    fn load_image_as_entry_to_jpeg_preserves_jpeg() {
+        let dir = tempdir().unwrap();
+        let jpg_path = write_temp_image(&dir, "img.jpg", 100, 100, false);
+        let original = std::fs::read(&jpg_path).unwrap();
+        let entry = load_image_as_entry(std::path::Path::new(&jpg_path), false, true).unwrap();
+        assert_eq!(entry.bytes, original, "已是 JPEG 不应二次编码");
+    }
 }
