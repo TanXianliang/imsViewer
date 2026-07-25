@@ -1329,7 +1329,10 @@ async fn start_batch_resize(
     app: tauri::AppHandle,
     config: BatchResizeConfig,
 ) -> Result<String, String> {
-    if config.max_edge < 64 {
+    if !config.enable_resize && !config.convert_to_jpeg {
+        return Err("请至少勾选一个操作：调整分辨率或转为 JPEG".into());
+    }
+    if config.enable_resize && config.max_edge < 64 {
         return Err("最长边分辨率不能小于 64".into());
     }
 
@@ -1363,6 +1366,7 @@ async fn start_batch_resize(
     let app_handle = app.clone();
     let max_edge = config.max_edge;
     let convert_to_jpeg = config.convert_to_jpeg;
+    let enable_resize = config.enable_resize;
 
     std::thread::spawn(move || {
         let result = if config.multi_threaded {
@@ -1378,7 +1382,7 @@ async fn start_batch_resize(
                     .and_then(|n| n.to_str())
                     .unwrap_or(fp);
                 // 扫描阶段已按路径去重，每个文件是独立任务，无跨文件冲突，无需全局写锁
-                let outcome = resize_ims_file(fp, max_edge, convert_to_jpeg);
+                let outcome = resize_ims_file(fp, max_edge, convert_to_jpeg, enable_resize);
                 let message = match &outcome {
                     Ok(ResizeOutcome::Resized {
                         sub_images_resized,
@@ -1427,7 +1431,7 @@ async fn start_batch_resize(
                     .and_then(|n| n.to_str())
                     .unwrap_or(fp);
                 // 扫描阶段已按路径去重，每个文件是独立任务，无跨文件冲突，无需全局写锁
-                let outcome = resize_ims_file(fp, max_edge, convert_to_jpeg);
+                let outcome = resize_ims_file(fp, max_edge, convert_to_jpeg, enable_resize);
                 let message = match &outcome {
                     Ok(ResizeOutcome::Resized {
                         sub_images_resized,

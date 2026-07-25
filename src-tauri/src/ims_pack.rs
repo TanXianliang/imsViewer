@@ -171,6 +171,11 @@ pub struct BatchExtractConfig {
     pub multi_threaded: bool,
 }
 
+/// serde 默认值辅助：enable_resize 默认 true（向后兼容，保持"总是调分辨率"行为）
+fn default_true() -> bool {
+    true
+}
+
 /// 批量调整分辨率配置（从前端传入）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchResizeConfig {
@@ -181,6 +186,9 @@ pub struct BatchResizeConfig {
     /// 是否将所有非 JPEG 子图转为 JPEG（q90）
     #[serde(default)]
     pub convert_to_jpeg: bool,
+    /// 是否调整分辨率（默认 true；false 时仅转 JPEG 不缩放）
+    #[serde(default = "default_true")]
+    pub enable_resize: bool,
 }
 
 /// 单个 IMS 文件的调整结果
@@ -592,6 +600,7 @@ pub fn resize_ims_file(
     filepath: &str,
     max_edge: u32,
     convert_to_jpeg: bool,
+    enable_resize: bool,
 ) -> Result<ResizeOutcome, String> {
     use crate::ims::{parse_ims, read_sub_image};
 
@@ -615,7 +624,7 @@ pub fn resize_ims_file(
         };
 
         let longest = decoded.width().max(decoded.height());
-        let oversized = longest > max_edge;
+        let oversized = enable_resize && longest > max_edge;
 
         // 未超标且（已是 JPEG 或未勾选转码）→ 保留原字节
         if !oversized && (is_jpeg || !convert_to_jpeg) {
