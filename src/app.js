@@ -904,11 +904,6 @@ async function checkForUpdates(manual = false) {
   try {
     const update = await check();
     if (!update) {
-      if (manual) alert('检查更新失败：无法连接到更新服务器');
-      return;
-    }
-
-    if (!update.available) {
       if (manual) alert('当前已是最新版本');
       return;
     }
@@ -979,9 +974,8 @@ async function downloadAndInstallUpdate(update, version) {
   progressText.textContent = '准备下载...';
   progressModal.style.display = 'flex';
 
-  let cancelled = false;
+  btnCancel.textContent = '后台继续';
   btnCancel.onclick = () => {
-    cancelled = true;
     progressModal.style.display = 'none';
   };
 
@@ -990,7 +984,6 @@ async function downloadAndInstallUpdate(update, version) {
     let contentLength = 0;
 
     await update.downloadAndInstall((event) => {
-      if (cancelled) return;
       switch (event.event) {
         case 'Started':
           contentLength = event.data.contentLength || 0;
@@ -1013,8 +1006,6 @@ async function downloadAndInstallUpdate(update, version) {
       }
     });
 
-    if (cancelled) return;
-
     progressModal.style.display = 'none';
 
     // 显示完成弹窗
@@ -1026,9 +1017,7 @@ async function downloadAndInstallUpdate(update, version) {
     completeModal.style.display = 'flex';
   } catch (err) {
     progressModal.style.display = 'none';
-    if (!cancelled) {
-      alert('更新下载失败: ' + (err.message || err));
-    }
+    alert('更新下载失败: ' + (err.message || err));
   }
 }
 
