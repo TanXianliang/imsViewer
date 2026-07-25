@@ -6,3 +6,7 @@ dist/
 bin/
 src-tauri/target/
 /samples/test
+
+# Tauri updater keys
+*.key
+*.key.pub
