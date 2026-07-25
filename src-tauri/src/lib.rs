@@ -1374,7 +1374,7 @@ async fn start_batch_resize(
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or(fp);
-                let _guard = IMS_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                // 扫描阶段已按路径去重，每个文件是独立任务，无跨文件冲突，无需全局写锁
                 let outcome = resize_ims_file(fp, max_edge, convert_to_jpeg);
                 let message = match &outcome {
                     Ok(ResizeOutcome::Resized {
@@ -1423,7 +1423,7 @@ async fn start_batch_resize(
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or(fp);
-                let _guard = IMS_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                // 扫描阶段已按路径去重，每个文件是独立任务，无跨文件冲突，无需全局写锁
                 let outcome = resize_ims_file(fp, max_edge, convert_to_jpeg);
                 let message = match &outcome {
                     Ok(ResizeOutcome::Resized {
