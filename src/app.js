@@ -6,7 +6,40 @@
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { listen } from '@tauri-apps/api/event';
+import { check } from '@tauri-apps/plugin-updater';
+import { relaunch } from '@tauri-apps/plugin-process';
 import { setupDedupTool } from './dedup.js';
+
+// ===== 更新检查 =====
+const SKIP_VERSION_KEY = 'imsviewer:skip-version';
+
+/**
+ * 比较两个语义化版本号
+ * @returns {number} 1: latest > current, -1: latest < current, 0: equal
+ */
+function compareVersions(current, latest) {
+  const c = current.split('.').map(Number);
+  const l = latest.split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    const cv = c[i] || 0;
+    const lv = l[i] || 0;
+    if (lv > cv) return 1;
+    if (lv < cv) return -1;
+  }
+  return 0;
+}
+
+function getSkippedVersion() {
+  return localStorage.getItem(SKIP_VERSION_KEY);
+}
+
+function skipVersion(version) {
+  localStorage.setItem(SKIP_VERSION_KEY, version);
+}
+
+function clearSkippedVersion() {
+  localStorage.removeItem(SKIP_VERSION_KEY);
+}
 
 // ===== State =====
 const state = {
@@ -859,6 +892,49 @@ async function setupWindowControls() {
   // 初始状态 + 监听窗口变化
   updateMaxIcon();
   win.onResized(updateMaxIcon);
+}
+
+// ===== 更新检查 =====
+let updateCheckInProgress = false;
+
+async function checkForUpdates(manual = false) {
+  if (updateCheckInProgress) return;
+  updateCheckInProgress = true;
+
+  try {
+    const update = await check();
+    if (!update) {
+      if (manual) alert('检查更新失败：无法连接到更新服务器');
+      return;
+    }
+
+    if (!update.available) {
+      if (manual) alert('当前已是最新版本');
+      return;
+    }
+
+    const currentVersion = update.currentVersion;
+    const latestVersion = update.version;
+
+    // 自动检查时，如果用户已跳过此版本，则静默忽略
+    if (!manual) {
+      const skipped = getSkippedVersion();
+      if (skipped && compareVersions(skipped, latestVersion) === 0) {
+        console.log(`用户已跳过版本 ${latestVersion}，不再提示`);
+        return;
+      }
+    }
+
+    // 显示更新提示弹窗
+    showUpdateModal(update, currentVersion, latestVersion);
+  } catch (err) {
+    console.error('检查更新失败:', err);
+    if (manual) {
+      alert('检查更新失败: ' + (err.message || err));
+    }
+  } finally {
+    updateCheckInProgress = false;
+  }
 }
 
 // ===== 菜单栏 =====
@@ -1963,3 +2039,8 @@ init();
     console.error('获取启动文件失败:', e);
   }
 })();
+
+// 启动后延迟 3 秒自动检查更新
+setTimeout(() => {
+  checkForUpdates(false);
+}, 3000);
