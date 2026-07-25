@@ -1750,6 +1750,8 @@ pub struct LaunchFile(pub Option<String>);
 pub fn run(launch_file: Option<String>) {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(LaunchFile(launch_file))
         .manage(ImsCache(Mutex::new(HashMap::new())))
         .manage(FolderScanState::new())
