@@ -57,6 +57,7 @@ fn index_update_search_and_cleanup_round_trip() {
         ],
         0,
         &ims_path.to_string_lossy(),
+        false,
     )
     .unwrap();
 

@@ -849,6 +849,7 @@ fn merge_into_existing_ims(
     output_path: &str,
     match_paths: &[String],
     insert_paths: &[String],
+    sub_images_to_jpeg: bool,
 ) -> Result<MergeExistingResult, String> {
     let _guard = IMS_WRITE_LOCK
         .lock()
@@ -879,13 +880,15 @@ fn merge_into_existing_ims(
         if !seen_sources.insert(source_path_key(path)) {
             continue;
         }
-        let entry = load_image_as_entry(Path::new(path), false)?;
+        let is_insert = insert_keys.contains(&source_path_key(path));
+        // 仅真正要插入的子图转 JPEG；用于 MD5 匹配的封面保持原字节（保证去重正确）
+        let entry = load_image_as_entry(Path::new(path), false, is_insert && sub_images_to_jpeg)?;
         let md5 = md5_hex(&entry.bytes);
         sources.push(MergeSourceEntry {
             path: path.clone(),
             entry,
             md5,
-            insert_candidate: insert_keys.contains(&source_path_key(path)),
+            insert_candidate: is_insert,
         });
     }
 
@@ -1576,6 +1579,7 @@ async fn start_batch_convert(app: tauri::AppHandle, config: BatchConfig) -> Resu
     let delete_source = config.delete_source;
     let multi = config.multi_threaded;
     let merge_existing_ims = config.merge_existing_ims;
+    let sub_images_to_jpeg = config.sub_images_to_jpeg;
     let app_handle = app.clone();
 
     std::thread::spawn(move || {
@@ -1585,6 +1589,7 @@ async fn start_batch_convert(app: tauri::AppHandle, config: BatchConfig) -> Resu
                     &task.output_path,
                     &task.match_paths,
                     &task.sub_image_paths,
+                    sub_images_to_jpeg,
                 )?;
                 if delete_source {
                     for src in &merge.delete_files {
@@ -1610,7 +1615,7 @@ async fn start_batch_convert(app: tauri::AppHandle, config: BatchConfig) -> Resu
             image_paths.push(cover_path.clone());
             image_paths.extend(task.sub_image_paths.clone());
 
-            pack_ims(&image_paths, 0, &task.output_path)?;
+            pack_ims(&image_paths, 0, &task.output_path, sub_images_to_jpeg)?;
             if delete_source {
                 for src in &task.source_files {
                     let _ = std::fs::remove_file(src);
