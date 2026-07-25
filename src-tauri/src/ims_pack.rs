@@ -156,6 +156,9 @@ pub struct BatchConfig {
     pub preserve_structure: bool,
     #[serde(default)]
     pub merge_existing_ims: bool,
+    /// 是否将所有非 JPEG 子图转为 JPEG（q90）
+    #[serde(default)]
+    pub sub_images_to_jpeg: bool,
 }
 
 /// 批量解压配置（从前端传入）
@@ -215,6 +218,7 @@ pub fn pack_ims(
     image_paths: &[String],
     cover_index: usize,
     output_path: &str,
+    sub_images_to_jpeg: bool,
 ) -> Result<(), String> {
     let count = image_paths.len();
     if count == 0 {
@@ -270,8 +274,22 @@ pub fn pack_ims(
             .to_string();
         let raw_bytes = std::fs::read(path).map_err(|e| format!("读取文件失败 {}: {}", path, e))?;
 
-        // WebP/AVIF → 自动转 PNG
-        let (final_bytes, final_format, final_filename) = if format == 2 || format == 3 {
+        let is_cover = i == cover_index;
+        // 子图转 JPEG（勾选且非 JPEG）；否则 WebP/AVIF → 自动转 PNG
+        let (final_bytes, final_format, final_filename) = if !is_cover
+            && sub_images_to_jpeg
+            && format != 0
+        {
+            // 子图转 JPEG：解码（AVIF 用 decode_avif）→ encode_resized 转 JPEG q90
+            let decoded = if format == 3 {
+                decode_avif(&raw_bytes)
+                    .map_err(|e| format!("解码 AVIF {} 失败: {}", path, e))?
+            } else {
+                image::load_from_memory(&raw_bytes)
+                    .map_err(|e| format!("解码 {} 失败: {}", path, e))?
+            };
+            encode_resized(&decoded, 0, &filename, CONVERT_JPEG_QUALITY)?
+        } else if format == 2 || format == 3 {
             let img = image::load_from_memory(&raw_bytes).map_err(|e| {
                 format!(
                     "解码 {} 失败: {} (格式: {})",
@@ -855,7 +873,7 @@ pub struct UpEntry {
     pub is_cover: bool,
 }
 
-pub fn load_image_as_entry(path: &Path, is_cover: bool) -> Result<UpEntry, String> {
+pub fn load_image_as_entry(path: &Path, is_cover: bool, to_jpeg: bool) -> Result<UpEntry, String> {
     if !path.exists() {
         return Err(format!("Source file does not exist: {}", path.display()));
     }
@@ -895,7 +913,17 @@ pub fn load_image_as_entry(path: &Path, is_cover: bool) -> Result<UpEntry, Strin
     let raw_bytes = std::fs::read(path)
         .map_err(|e| format!("Failed to read source file {}: {}", path.display(), e))?;
 
-    let (bytes, final_format, final_filename) = if format == 2 || format == 3 {
+    let (bytes, final_format, final_filename) = if to_jpeg && format != 0 {
+        // 转 JPEG：解码（AVIF 用 decode_avif）→ encode_resized 转 JPEG q90
+        let decoded = if format == 3 {
+            decode_avif(&raw_bytes)
+                .map_err(|e| format!("Failed to decode AVIF {}: {}", path.display(), e))?
+        } else {
+            image::load_from_memory(&raw_bytes)
+                .map_err(|e| format!("Failed to decode {}: {}", path.display(), e))?
+        };
+        encode_resized(&decoded, 0, &filename, CONVERT_JPEG_QUALITY)?
+    } else if format == 2 || format == 3 {
         let img = image::load_from_memory(&raw_bytes).map_err(|e| {
             format!(
                 "Failed to decode {}: {} ({})",
