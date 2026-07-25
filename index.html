@@ -420,6 +420,77 @@
     </div>
   </div>
 
+  <!-- 更新提示模态框 -->
+  <div id="update-modal" class="modal-overlay" style="display:none">
+    <div class="modal-container" style="width: 480px">
+      <div class="modal-header">
+        <span>发现新版本</span>
+        <button class="btn-modal-close" id="btn-update-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="update-version-info">
+          <div class="update-version-row">
+            <span class="update-label">当前版本:</span>
+            <span class="update-value" id="update-current-version">-</span>
+          </div>
+          <div class="update-version-row">
+            <span class="update-label">最新版本:</span>
+            <span class="update-value update-new-version" id="update-latest-version">-</span>
+          </div>
+        </div>
+        <div class="update-notes-section">
+          <div class="update-notes-title">更新内容:</div>
+          <div class="update-notes-content" id="update-notes">暂无更新说明</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-update-skip" class="btn-secondary">跳过此版本</button>
+        <button id="btn-update-later" class="btn-secondary">稍后提醒</button>
+        <button id="btn-update-now" class="btn-primary">立即更新</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 更新下载进度模态框 -->
+  <div id="update-progress-modal" class="modal-overlay" style="display:none">
+    <div class="modal-container" style="width: 400px">
+      <div class="modal-header">
+        <span>正在下载更新</span>
+      </div>
+      <div class="modal-body">
+        <div class="update-progress-info">
+          <div class="update-progress-version" id="update-progress-version">v-</div>
+          <div class="progress-bar-container" style="margin: 12px 0">
+            <div class="progress-bar-fill" id="update-progress-fill"></div>
+          </div>
+          <div class="update-progress-text" id="update-progress-text">准备下载...</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-update-cancel" class="btn-secondary">取消下载</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 更新完成模态框 -->
+  <div id="update-complete-modal" class="modal-overlay" style="display:none">
+    <div class="modal-container" style="width: 400px">
+      <div class="modal-header">
+        <span>更新下载完成</span>
+      </div>
+      <div class="modal-body">
+        <div class="update-complete-message">
+          imsViewer 将重启以完成安装。
+          <br><br>
+          点击"立即重启安装"开始更新。
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-update-restart" class="btn-primary">立即重启安装</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 缩略图右键菜单（编辑模式） -->
   <div id="thumb-context-menu" class="context-menu" style="display:none">
     <div class="context-action" data-action="insert-image">插入图片...</div>

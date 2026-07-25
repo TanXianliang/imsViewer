@@ -937,6 +937,35 @@ async function checkForUpdates(manual = false) {
   }
 }
 
+function showUpdateModal(update, currentVersion, latestVersion) {
+  const modal = $('#update-modal');
+  $('#update-current-version').textContent = 'v' + currentVersion;
+  $('#update-latest-version').textContent = 'v' + latestVersion;
+  $('#update-notes').textContent = update.body || '暂无更新说明';
+
+  // 绑定按钮事件（先移除旧监听器）
+  const btnSkip = $('#btn-update-skip');
+  const btnLater = $('#btn-update-later');
+  const btnNow = $('#btn-update-now');
+  const btnClose = $('#btn-update-close');
+
+  const closeModal = () => { modal.style.display = 'none'; };
+
+  // 使用 onclick 覆盖旧监听器
+  btnSkip.onclick = () => {
+    skipVersion(latestVersion);
+    closeModal();
+  };
+  btnLater.onclick = closeModal;
+  btnClose.onclick = closeModal;
+  btnNow.onclick = async () => {
+    closeModal();
+    await downloadAndInstallUpdate(update, latestVersion);
+  };
+
+  modal.style.display = 'flex';
+}
+
 // ===== 菜单栏 =====
 function setupMenuActions() {
   $$('.menu-item').forEach(item => {

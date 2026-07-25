@@ -617,6 +617,71 @@ body {
   white-space: nowrap;
 }
 
+/* ===== 更新弹窗 ===== */
+.update-version-info {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 0;
+}
+.update-version-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+}
+.update-label {
+  color: var(--text-secondary);
+}
+.update-value {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+.update-new-version {
+  color: var(--accent);
+  font-weight: 600;
+}
+.update-notes-section {
+  margin-top: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.update-notes-title {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+.update-notes-content {
+  font-size: 12px;
+  color: var(--text-primary);
+  line-height: 1.5;
+  max-height: 120px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.update-progress-info {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 8px 0;
+}
+.update-progress-version {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent);
+}
+.update-progress-text {
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-align: center;
+}
+.update-complete-message {
+  font-size: 13px;
+  line-height: 1.6;
+  text-align: center;
+  padding: 16px 0;
+}
+
 /* ===== 保存确认对话框 ===== */
 .save-confirm-overlay {
   position: fixed;
