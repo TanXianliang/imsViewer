@@ -320,7 +320,7 @@ pub fn pack_ims(
             filename: final_filename,
             format: final_format,
             bytes: final_bytes,
-            is_cover: i == cover_index,
+            is_cover,
         });
     }
 
@@ -1623,6 +1623,59 @@ mod tests {
             decoded.color(),
             image::ColorType::Rgba8,
             "转 JPEG 后 alpha 应被合成"
+        );
+    }
+
+    #[test]
+    fn pack_ims_converts_sub_image_webp_to_jpeg() {
+        let dir = tempdir().unwrap();
+        let cover = write_temp_image(&dir, "cover.jpg", 100, 100, false);
+        // image crate 已启用 webp 特性，可直接通过扩展名保存
+        let sub = write_temp_image(&dir, "cover_00001_.webp", 200, 200, false);
+        let output = dir.path().join("out.ims.jpg").to_string_lossy().to_string();
+        pack_ims(&[cover, sub], 0, &output, true).unwrap();
+        let info = crate::ims::parse_ims(&output).unwrap();
+        assert_eq!(info.images[0].format, 0, "封面应保持 JPEG");
+        assert_eq!(info.images[1].format, 0, "WebP 子图应转为 JPEG");
+        assert!(
+            info.images[1].filename.ends_with(".jpg"),
+            "子图扩展名应为 .jpg"
+        );
+    }
+
+    #[test]
+    fn pack_ims_converts_sub_image_avif_to_jpeg() {
+        let dir = tempdir().unwrap();
+        let cover = write_temp_image(&dir, "cover.jpg", 100, 100, false);
+
+        // 构造 AVIF 子图字节（复用 make_ims_jpeg_cover_with_avif_sub 的编码方式）
+        let avif_img = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            200,
+            200,
+            image::Rgb([100, 120, 140]),
+        ));
+        let rgba = avif_img.to_rgba8();
+        let mut avif_bytes = Vec::new();
+        image::codecs::avif::AvifEncoder::new_with_speed_quality(&mut avif_bytes, 10, 100)
+            .write_image(
+                rgba.as_raw(),
+                rgba.width(),
+                rgba.height(),
+                image::ExtendedColorType::Rgba8,
+            )
+            .unwrap();
+        let sub_path = dir.path().join("cover_00001_.avif");
+        std::fs::write(&sub_path, &avif_bytes).unwrap();
+        let sub = sub_path.to_string_lossy().to_string();
+
+        let output = dir.path().join("out.ims.jpg").to_string_lossy().to_string();
+        pack_ims(&[cover, sub], 0, &output, true).unwrap();
+        let info = crate::ims::parse_ims(&output).unwrap();
+        assert_eq!(info.images[0].format, 0, "封面应保持 JPEG");
+        assert_eq!(info.images[1].format, 0, "AVIF 子图应转为 JPEG");
+        assert!(
+            info.images[1].filename.ends_with(".jpg"),
+            "子图扩展名应为 .jpg"
         );
     }
 
