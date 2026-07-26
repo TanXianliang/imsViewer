@@ -6,6 +6,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { listen } from '@tauri-apps/api/event';
+import { getVersion } from '@tauri-apps/api/app';
 import { check } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { setupDedupTool } from './dedup.js';
@@ -1160,13 +1161,23 @@ function setupMenuActions() {
           break;
         case 'about': {
           const skipped = getSkippedVersion();
-          let aboutText = 'imsViewer v' + (window.__imsVersion || '1.2.1') + '\n';
-          aboutText += 'IMS 图片浏览器\n基于 Tauri v2 + Rust + Canvas';
-          if (skipped) {
-            aboutText += '\n\n已跳过版本: v' + skipped;
-            aboutText += '\n(点击"检查更新"可恢复提示)';
-          }
-          alert(aboutText);
+          getVersion().then(ver => {
+            let aboutText = 'imsViewer v' + ver + '\n';
+            aboutText += 'IMS 图片浏览器\n基于 Tauri v2 + Rust + Canvas';
+            if (skipped) {
+              aboutText += '\n\n已跳过版本: v' + skipped;
+              aboutText += '\n(点击"检查更新"可恢复提示)';
+            }
+            alert(aboutText);
+          }).catch(() => {
+            let aboutText = 'imsViewer\n';
+            aboutText += 'IMS 图片浏览器\n基于 Tauri v2 + Rust + Canvas';
+            if (skipped) {
+              aboutText += '\n\n已跳过版本: v' + skipped;
+              aboutText += '\n(点击"检查更新"可恢复提示)';
+            }
+            alert(aboutText);
+          });
           break;
         }
       }
