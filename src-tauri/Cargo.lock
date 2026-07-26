@@ -2192,7 +2192,7 @@ checksum = "89194689a993ab15268672e99e7b0e19da2da3268ac682e8f02d29d4d1434cd7"
 
 [[package]]
 name = "imsviewer"
-version = "1.2.1"
+version = "1.2.2"
 dependencies = [
  "avif-rs",
  "base64 0.22.1",

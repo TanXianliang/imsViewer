@@ -1,0 +1,12 @@
+[package]
+name = "ims-signer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+minisign = "0.9"
+base64 = "0.22"
+
+[[bin]]
+name = "ims-signer"
+path = "src/main.rs"
