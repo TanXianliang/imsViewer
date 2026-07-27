@@ -1747,6 +1747,43 @@ fn get_launch_file(state: tauri::State<'_, LaunchFile>) -> Result<Option<String>
 pub struct LaunchFile(pub Option<String>);
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// 清理 Tauri Updater 残留的临时安装包。
+/// Updater 下载的安装包写入 %TEMP%\imsViewer-<ver>-updater-*\ 目录，
+/// 因 install_inner 调用 std::process::exit(0) 跳过 Drop，临时文件不会被自动删除。
+/// 此命令在应用启动时调用，删除所有旧的 updater 临时目录。
+#[tauri::command]
+fn cleanup_updater_temp() -> Result<u64, String> {
+    let temp_dir = std::env::temp_dir();
+    let mut removed: u64 = 0;
+
+    let read_dir = std::fs::read_dir(&temp_dir)
+        .map_err(|e| format!("读取临时目录失败: {}", e))?;
+
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        // 匹配 Tauri Updater 的临时目录命名: imsViewer-<version>-updater-<random>
+        if !name.starts_with("imsViewer-") || !name.contains("-updater-") {
+            continue;
+        }
+        if !path.is_dir() {
+            continue;
+        }
+        match std::fs::remove_dir_all(&path) {
+            Ok(_) => removed += 1,
+            Err(e) => {
+                // 目录可能被正在运行的安装器锁定，忽略错误
+                eprintln!("清理 updater 临时目录失败 {:?}: {}", path, e);
+            }
+        }
+    }
+
+    Ok(removed)
+}
+
 pub fn run(launch_file: Option<String>) {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -1794,6 +1831,7 @@ pub fn run(launch_file: Option<String>) {
             dedup::dedup_delete_index,
             dedup::dedup_delete_all_indexes,
             dedup::dedup_reveal_file,
+            cleanup_updater_temp,
         ])
         .run(tauri::generate_context!())
         .expect("启动 imsViewer 失败");

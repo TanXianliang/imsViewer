@@ -2146,6 +2146,13 @@ init();
   }
 })();
 
+// 启动后清理 Updater 残留的临时安装包（静默执行，失败不影响使用）
+invoke('cleanup_updater_temp').then((count) => {
+  if (count > 0) console.log(`已清理 ${count} 个 updater 临时目录`);
+}).catch((e) => {
+  console.error('清理 updater 临时目录失败:', e);
+});
+
 // 启动后延迟 3 秒自动检查更新
 setTimeout(() => {
   checkForUpdates(false);
