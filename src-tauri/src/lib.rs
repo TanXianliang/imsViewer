@@ -11,6 +11,7 @@
 use base64::Engine;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::Mutex;
 use std::time::SystemTime;
 use tauri::Emitter;
@@ -25,10 +26,11 @@ use ims::{
     FolderEntry, SaveImagePayload, SubImagePayload,
 };
 use ims_pack::{
-    compute_output_path, load_image_as_entry, pack_ims, resize_ims_file, save_ims_entries_atomic,
-    scan_ims_files, scan_multiple_folders, scan_multiple_folders_with_options, upgrade_ims_file,
-    BatchConfig, BatchExtractConfig, BatchResizeConfig, ImageGroup, ProgressPayload,
-    ResizeOutcome, UpEntry,
+    compute_output_path, load_image_as_entry, pack_ims, resize_file_identity_key, resize_ims_file,
+    resize_standard_image, save_ims_entries_atomic, scan_ims_files, scan_multiple_folders,
+    scan_multiple_folders_with_options, scan_resize_files, upgrade_ims_file, BatchConfig,
+    BatchExtractConfig, BatchResizeConfig, ImageGroup, ProgressPayload, ResizeFileKind,
+    ResizeFileTask, ResizeOutcome, StandardResizeOutcome, UpEntry,
 };
 
 /// IMS 解析缓存：避免对同一文件反复调用 parse_ims（读取索引区）。
@@ -53,6 +55,40 @@ impl FolderScanState {
 const MAX_CACHE_ENTRIES: usize = 64;
 static EXPORT_WRITE_LOCK: Mutex<()> = Mutex::new(());
 static IMS_WRITE_LOCK: Mutex<()> = Mutex::new(());
+static BATCH_RESIZE_RUNNING: AtomicBool = AtomicBool::new(false);
+const BATCH_RESIZE_PROGRESS_EVENT: &str = "batch-resize-progress";
+
+struct BatchResizeRunGuard;
+
+impl BatchResizeRunGuard {
+    fn acquire() -> Result<Self, String> {
+        BATCH_RESIZE_RUNNING
+            .compare_exchange(false, true, AtomicOrdering::AcqRel, AtomicOrdering::Acquire)
+            .map(|_| Self)
+            .map_err(|_| "已有调整分辨率任务正在运行，请等待其完成".into())
+    }
+}
+
+impl Drop for BatchResizeRunGuard {
+    fn drop(&mut self) {
+        BATCH_RESIZE_RUNNING.store(false, AtomicOrdering::Release);
+    }
+}
+
+#[cfg(test)]
+mod batch_resize_run_guard_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_overlapping_runs_and_releases_after_completion() {
+        BATCH_RESIZE_RUNNING.store(false, AtomicOrdering::Release);
+        let first = BatchResizeRunGuard::acquire().unwrap();
+
+        assert!(BatchResizeRunGuard::acquire().is_err());
+        drop(first);
+        assert!(BatchResizeRunGuard::acquire().is_ok());
+    }
+}
 
 /// 带缓存的 parse_ims：命中缓存则直接返回，否则解析并写入缓存。
 /// 超过 MAX_CACHE_ENTRIES 时全部清空，防止无界增长。
@@ -1324,6 +1360,239 @@ fn resize_summary(resized: usize, converted: usize) -> String {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ResizeReportStatus {
+    Succeeded,
+    Skipped,
+    Failed,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct ResizeIssue {
+    kind: String,
+    path: String,
+    reason: String,
+}
+
+#[derive(Debug, Clone)]
+struct ResizeTaskReport {
+    status: ResizeReportStatus,
+    message: String,
+    issue: Option<ResizeIssue>,
+    invalidate_ims_cache: bool,
+}
+
+impl ResizeTaskReport {
+    fn succeeded(message: String, invalidate_ims_cache: bool) -> Self {
+        Self {
+            status: ResizeReportStatus::Succeeded,
+            message,
+            issue: None,
+            invalidate_ims_cache,
+        }
+    }
+
+    fn skipped(message: String) -> Self {
+        Self {
+            status: ResizeReportStatus::Skipped,
+            message,
+            issue: None,
+            invalidate_ims_cache: false,
+        }
+    }
+
+    fn skipped_with_issue(path: &str, message: String, reason: String) -> Self {
+        Self {
+            status: ResizeReportStatus::Skipped,
+            message,
+            issue: Some(ResizeIssue {
+                kind: "跳过".into(),
+                path: path.into(),
+                reason,
+            }),
+            invalidate_ims_cache: false,
+        }
+    }
+
+    fn failed(path: &str, filename: &str, reason: String) -> Self {
+        Self {
+            status: ResizeReportStatus::Failed,
+            message: format!("失败 {}: {}", filename, reason),
+            issue: Some(ResizeIssue {
+                kind: "失败".into(),
+                path: path.into(),
+                reason,
+            }),
+            invalidate_ims_cache: false,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct ResizeBatchSummary {
+    succeeded: u32,
+    skipped: u32,
+    failed: u32,
+    issues: Vec<ResizeIssue>,
+}
+
+impl ResizeBatchSummary {
+    fn from_reports(reports: Vec<ResizeTaskReport>) -> Self {
+        let mut summary = Self::default();
+        for report in reports {
+            match report.status {
+                ResizeReportStatus::Succeeded => summary.succeeded += 1,
+                ResizeReportStatus::Skipped => summary.skipped += 1,
+                ResizeReportStatus::Failed => summary.failed += 1,
+            }
+            if let Some(issue) = report.issue {
+                summary.issues.push(issue);
+            }
+        }
+        summary
+            .issues
+            .sort_by(|left, right| left.path.to_lowercase().cmp(&right.path.to_lowercase()));
+        summary
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct ResizeProgressPayload {
+    job_id: String,
+    current: u32,
+    total: u32,
+    message: String,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    succeeded: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skipped: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failed: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    issues: Option<Vec<ResizeIssue>>,
+}
+
+impl ResizeProgressPayload {
+    fn running(job_id: &str, current: u32, total: u32, message: String) -> Self {
+        Self {
+            job_id: job_id.into(),
+            current,
+            total,
+            message,
+            status: "running".into(),
+            succeeded: None,
+            skipped: None,
+            failed: None,
+            issues: None,
+        }
+    }
+
+    fn completed(job_id: &str, total: u32, summary: ResizeBatchSummary) -> Self {
+        let issue_count = summary.issues.len();
+        let message = if issue_count == 0 {
+            format!(
+                "处理完成：成功 {}，跳过 {}，失败 {}",
+                summary.succeeded, summary.skipped, summary.failed
+            )
+        } else {
+            format!(
+                "处理完成：成功 {}，跳过 {}，失败 {}；{} 个文件未处理",
+                summary.succeeded, summary.skipped, summary.failed, issue_count
+            )
+        };
+        Self {
+            job_id: job_id.into(),
+            current: total,
+            total,
+            message,
+            status: "completed".into(),
+            succeeded: Some(summary.succeeded),
+            skipped: Some(summary.skipped),
+            failed: Some(summary.failed),
+            issues: Some(summary.issues),
+        }
+    }
+}
+
+fn process_resize_task(
+    task: &ResizeFileTask,
+    max_edge: u32,
+    convert_to_jpeg: bool,
+    enable_resize: bool,
+) -> ResizeTaskReport {
+    let filename = Path::new(&task.path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(&task.path);
+
+    match task.kind {
+        ResizeFileKind::Ims => {
+            match resize_ims_file(&task.path, max_edge, convert_to_jpeg, enable_resize) {
+                Ok(ResizeOutcome::Resized {
+                    sub_images_resized,
+                    sub_images_converted,
+                }) => ResizeTaskReport::succeeded(
+                    format!(
+                        "已处理 {} ({})",
+                        filename,
+                        resize_summary(sub_images_resized, sub_images_converted)
+                    ),
+                    true,
+                ),
+                Ok(ResizeOutcome::Skipped) => {
+                    ResizeTaskReport::skipped(format!("跳过 {} (无需处理)", filename))
+                }
+                Err(error) => ResizeTaskReport::failed(&task.path, filename, error),
+            }
+        }
+        ResizeFileKind::Standard => {
+            match resize_standard_image(&task.path, max_edge, convert_to_jpeg, enable_resize) {
+                Ok(StandardResizeOutcome::Processed {
+                    resized,
+                    converted,
+                    output_path,
+                }) => {
+                    let action = match (resized, converted) {
+                        (true, true) => format!("缩小并转 JPEG → {}", output_path.display()),
+                        (true, false) => "缩小".into(),
+                        (false, true) => format!("转 JPEG → {}", output_path.display()),
+                        (false, false) => "无变化".into(),
+                    };
+                    ResizeTaskReport::succeeded(format!("已处理 {} ({})", filename, action), false)
+                }
+                Ok(StandardResizeOutcome::Skipped) => {
+                    ResizeTaskReport::skipped(format!("跳过 {} (无需处理)", filename))
+                }
+                Ok(StandardResizeOutcome::Conflict { target_path }) => {
+                    let reason = format!("目标文件已存在: {}", target_path.display());
+                    ResizeTaskReport::skipped_with_issue(
+                        &task.path,
+                        format!("跳过 {} ({})", filename, reason),
+                        reason,
+                    )
+                }
+                Err(error) => ResizeTaskReport::failed(&task.path, filename, error),
+            }
+        }
+    }
+}
+
+fn invalidate_resized_ims(
+    app: &tauri::AppHandle,
+    task: &ResizeFileTask,
+    report: &ResizeTaskReport,
+) {
+    if task.kind != ResizeFileKind::Ims || !report.invalidate_ims_cache {
+        return;
+    }
+    if let Some(cache) = app.try_state::<ImsCache>() {
+        if let Ok(mut map) = cache.0.lock() {
+            map.remove(&task.path);
+        }
+    }
+}
+
 #[tauri::command]
 async fn start_batch_resize(
     app: tauri::AppHandle,
@@ -1335,166 +1604,92 @@ async fn start_batch_resize(
     if config.enable_resize && config.max_edge < 64 {
         return Err("最长边分辨率不能小于 64".into());
     }
+    let run_guard = BatchResizeRunGuard::acquire()?;
 
-    // 扫描所有文件夹的 IMS 文件并按路径去重（保留顺序）
-    let mut files: Vec<String> = Vec::new();
+    // 扫描所选范围并按路径去重（保留文件夹顺序）。
+    let mut tasks: Vec<ResizeFileTask> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for folder in &config.folders {
-        for fp in scan_ims_files(&folder.path, folder.depth) {
-            if seen.insert(fp.clone()) {
-                files.push(fp);
+        for task in scan_resize_files(&folder.path, folder.depth, config.file_scope) {
+            if seen.insert(resize_file_identity_key(&task.path)) {
+                tasks.push(task);
             }
         }
     }
-    let total = files.len() as u32;
+    let total = tasks.len() as u32;
 
     if total == 0 {
-        return Err("未发现 IMS 文件".into());
+        return Err(format!("未发现{}", config.file_scope.label()));
     }
 
-    let total_msg = format!("共发现 {} 个 IMS 文件", total);
+    let total_msg = format!("共发现 {} 个文件（{}）", total, config.file_scope.label());
+    let job_id = if config.job_id.trim().is_empty() {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        config.job_id.clone()
+    };
     let _ = app.emit(
-        "batch-progress",
-        ProgressPayload {
-            current: 0,
-            total,
-            message: total_msg.clone(),
-            status: "running".into(),
-        },
+        BATCH_RESIZE_PROGRESS_EVENT,
+        ResizeProgressPayload::running(&job_id, 0, total, total_msg.clone()),
     );
 
     let app_handle = app.clone();
     let max_edge = config.max_edge;
     let convert_to_jpeg = config.convert_to_jpeg;
     let enable_resize = config.enable_resize;
+    let multi_threaded = config.multi_threaded;
 
     std::thread::spawn(move || {
-        let result = if config.multi_threaded {
+        let _run_guard = run_guard;
+        let reports = if multi_threaded {
             use rayon::prelude::*;
-            use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+            use std::sync::atomic::{AtomicU32, Ordering};
 
             let completed = AtomicU32::new(0);
-            let has_error = AtomicBool::new(false);
 
-            files.par_iter().for_each(|fp| {
-                let fname = Path::new(fp)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(fp);
-                // 扫描阶段已按路径去重，每个文件是独立任务，无跨文件冲突，无需全局写锁
-                let outcome = resize_ims_file(fp, max_edge, convert_to_jpeg, enable_resize);
-                let message = match &outcome {
-                    Ok(ResizeOutcome::Resized {
-                        sub_images_resized,
-                        sub_images_converted,
-                    }) => format!(
-                        "已调整 {} ({})",
-                        fname,
-                        resize_summary(*sub_images_resized, *sub_images_converted)
-                    ),
-                    Ok(ResizeOutcome::Skipped) => format!("跳过 {} (无需处理)", fname),
-                    Err(e) => format!("失败 {}: {}", fname, e),
-                };
-                if outcome.is_err() {
-                    has_error.store(true, Ordering::SeqCst);
-                } else {
-                    // 成功重写后失效 ImsCache
-                    if let Some(cache) = app_handle.try_state::<ImsCache>() {
-                        if let Ok(mut map) = cache.0.lock() {
-                            map.remove(fp);
-                        }
-                    }
-                }
-                let current = completed.fetch_add(1, Ordering::SeqCst) + 1;
-                let _ = app_handle.emit(
-                    "batch-progress",
-                    ProgressPayload {
-                        current,
-                        total,
-                        message,
-                        status: "running".into(),
-                    },
-                );
-            });
-
-            if has_error.load(Ordering::SeqCst) {
-                Err("有文件处理失败".into())
-            } else {
-                Ok(())
-            }
+            tasks
+                .par_iter()
+                .map(|task| {
+                    let report =
+                        process_resize_task(task, max_edge, convert_to_jpeg, enable_resize);
+                    invalidate_resized_ims(&app_handle, task, &report);
+                    let current = completed.fetch_add(1, Ordering::SeqCst) + 1;
+                    let _ = app_handle.emit(
+                        BATCH_RESIZE_PROGRESS_EVENT,
+                        ResizeProgressPayload::running(
+                            &job_id,
+                            current,
+                            total,
+                            report.message.clone(),
+                        ),
+                    );
+                    report
+                })
+                .collect::<Vec<_>>()
         } else {
-            let mut completed: u32 = 0;
-            let mut has_error = false;
-            for fp in &files {
-                let fname = Path::new(fp)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(fp);
-                // 扫描阶段已按路径去重，每个文件是独立任务，无跨文件冲突，无需全局写锁
-                let outcome = resize_ims_file(fp, max_edge, convert_to_jpeg, enable_resize);
-                let message = match &outcome {
-                    Ok(ResizeOutcome::Resized {
-                        sub_images_resized,
-                        sub_images_converted,
-                    }) => format!(
-                        "已调整 {} ({})",
-                        fname,
-                        resize_summary(*sub_images_resized, *sub_images_converted)
-                    ),
-                    Ok(ResizeOutcome::Skipped) => format!("跳过 {} (无需处理)", fname),
-                    Err(e) => format!("失败 {}: {}", fname, e),
-                };
-                if outcome.is_err() {
-                    has_error = true;
-                } else if let Ok(ResizeOutcome::Resized { .. }) = &outcome {
-                    if let Some(cache) = app_handle.try_state::<ImsCache>() {
-                        if let Ok(mut map) = cache.0.lock() {
-                            map.remove(fp);
-                        }
-                    }
-                }
-                completed += 1;
+            let mut reports = Vec::with_capacity(tasks.len());
+            for (index, task) in tasks.iter().enumerate() {
+                let report = process_resize_task(task, max_edge, convert_to_jpeg, enable_resize);
+                invalidate_resized_ims(&app_handle, task, &report);
                 let _ = app_handle.emit(
-                    "batch-progress",
-                    ProgressPayload {
-                        current: completed,
+                    BATCH_RESIZE_PROGRESS_EVENT,
+                    ResizeProgressPayload::running(
+                        &job_id,
+                        index as u32 + 1,
                         total,
-                        message,
-                        status: "running".into(),
-                    },
+                        report.message.clone(),
+                    ),
                 );
+                reports.push(report);
             }
-            if has_error {
-                Err("有文件处理失败".into())
-            } else {
-                Ok(())
-            }
+            reports
         };
 
-        match result {
-            Ok(()) => {
-                let _ = app_handle.emit(
-                    "batch-progress",
-                    ProgressPayload {
-                        current: total,
-                        total,
-                        message: format!("全部完成，共 {} 个文件", total),
-                        status: "completed".into(),
-                    },
-                );
-            }
-            Err(e) => {
-                let _ = app_handle.emit(
-                    "batch-progress",
-                    ProgressPayload {
-                        current: total,
-                        total,
-                        message: e,
-                        status: "error".into(),
-                    },
-                );
-            }
-        }
+        let summary = ResizeBatchSummary::from_reports(reports);
+        let _ = app_handle.emit(
+            BATCH_RESIZE_PROGRESS_EVENT,
+            ResizeProgressPayload::completed(&job_id, total, summary),
+        );
     });
 
     Ok(total_msg)

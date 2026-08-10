@@ -189,6 +189,57 @@ pub struct BatchResizeConfig {
     /// 是否调整分辨率（默认 true；false 时仅转 JPEG 不缩放）
     #[serde(default = "default_true")]
     pub enable_resize: bool,
+    /// 要处理的文件类型范围；默认只处理 IMS，保持旧版本行为。
+    #[serde(default)]
+    pub file_scope: ResizeFileScope,
+    /// 前端生成的运行标识，用于过滤其他批处理任务的进度事件。
+    #[serde(default)]
+    pub job_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResizeFileScope {
+    ImsOnly,
+    StandardOnly,
+    All,
+}
+
+impl Default for ResizeFileScope {
+    fn default() -> Self {
+        Self::ImsOnly
+    }
+}
+
+impl ResizeFileScope {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ImsOnly => "IMS 文件",
+            Self::StandardOnly => "非 IMS 图片",
+            Self::All => "IMS 和非 IMS 图片",
+        }
+    }
+
+    fn includes(self, kind: ResizeFileKind) -> bool {
+        matches!(self, Self::All)
+            || matches!(
+                (self, kind),
+                (Self::ImsOnly, ResizeFileKind::Ims)
+                    | (Self::StandardOnly, ResizeFileKind::Standard)
+            )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResizeFileKind {
+    Ims,
+    Standard,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResizeFileTask {
+    pub path: String,
+    pub kind: ResizeFileKind,
 }
 
 /// 单个 IMS 文件的调整结果
@@ -202,6 +253,28 @@ pub enum ResizeOutcome {
     },
     /// 全部子图未超标且无需转码，文件未改动
     Skipped,
+}
+
+/// 单个普通图片文件的调整结果。
+#[derive(Debug, Clone)]
+pub enum StandardResizeOutcome {
+    Processed {
+        resized: bool,
+        converted: bool,
+        output_path: PathBuf,
+    },
+    Skipped,
+    Conflict {
+        target_path: PathBuf,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StandardImageFormat {
+    Jpeg,
+    Png,
+    WebP,
+    Avif,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -704,6 +777,314 @@ pub fn resize_ims_file(
     })
 }
 
+fn standard_image_format(path: &Path) -> Result<StandardImageFormat, String> {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("")
+        .to_lowercase()
+        .as_str()
+    {
+        "jpg" | "jpeg" => Ok(StandardImageFormat::Jpeg),
+        "png" => Ok(StandardImageFormat::Png),
+        "webp" => Ok(StandardImageFormat::WebP),
+        "avif" => Ok(StandardImageFormat::Avif),
+        _ => Err(format!("不支持的普通图片格式: {}", path.display())),
+    }
+}
+
+fn decode_standard_image(
+    path: &Path,
+    format: StandardImageFormat,
+) -> Result<image::DynamicImage, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("读取图片失败 {}: {}", path.display(), error))?;
+    if format == StandardImageFormat::Avif {
+        decode_avif(&bytes).map_err(|error| format!("解码 AVIF 失败 {}: {}", path.display(), error))
+    } else {
+        image::load_from_memory(&bytes)
+            .map_err(|error| format!("解码图片失败 {}: {}", path.display(), error))
+    }
+}
+
+fn encode_standard_image(
+    image: &image::DynamicImage,
+    format: StandardImageFormat,
+) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    match format {
+        StandardImageFormat::Jpeg => {
+            let rgb = flatten_alpha_to_rgb(image.to_rgba8());
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, CONVERT_JPEG_QUALITY)
+                .encode(
+                    rgb.as_raw(),
+                    rgb.width(),
+                    rgb.height(),
+                    image::ExtendedColorType::Rgb8,
+                )
+                .map_err(|error| format!("JPEG 编码失败: {}", error))?;
+        }
+        StandardImageFormat::Png => {
+            let rgba = image.to_rgba8();
+            image::codecs::png::PngEncoder::new_with_quality(
+                &mut bytes,
+                image::codecs::png::CompressionType::Fast,
+                image::codecs::png::FilterType::Adaptive,
+            )
+            .write_image(
+                rgba.as_raw(),
+                rgba.width(),
+                rgba.height(),
+                image::ExtendedColorType::Rgba8,
+            )
+            .map_err(|error| format!("PNG 编码失败: {}", error))?;
+        }
+        StandardImageFormat::WebP => {
+            let rgba = image.to_rgba8();
+            image::codecs::webp::WebPEncoder::new_lossless(&mut bytes)
+                .write_image(
+                    rgba.as_raw(),
+                    rgba.width(),
+                    rgba.height(),
+                    image::ExtendedColorType::Rgba8,
+                )
+                .map_err(|error| format!("WebP 编码失败: {}", error))?;
+        }
+        StandardImageFormat::Avif => {
+            let rgba = image.to_rgba8();
+            avif::AvifEncoder::new(&mut bytes)
+                .with_speed(8)
+                .with_quality(80)
+                .with_quality_alpha(80)
+                .write_image(
+                    rgba.as_raw(),
+                    rgba.width(),
+                    rgba.height(),
+                    image::ExtendedColorType::Rgba8,
+                )
+                .map_err(|error| format!("AVIF 编码失败: {}", error))?;
+        }
+    }
+    Ok(bytes)
+}
+
+fn sibling_work_path(path: &Path, purpose: &str) -> PathBuf {
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("image");
+    path.with_file_name(format!(
+        ".{}.imsviewer-{}-{}",
+        filename,
+        purpose,
+        uuid::Uuid::new_v4()
+    ))
+}
+
+fn write_complete_temp(path: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
+    let temp_path = sibling_work_path(path, "resize");
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)
+        .map_err(|error| format!("创建临时文件失败 {}: {}", temp_path.display(), error))?;
+    if let Err(error) = file.write_all(bytes).and_then(|_| file.sync_all()) {
+        drop(file);
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(format!(
+            "写入临时文件失败 {}: {}",
+            temp_path.display(),
+            error
+        ));
+    }
+    Ok(temp_path)
+}
+
+fn replace_source_with_temp(source_path: &Path, temp_path: &Path) -> Result<(), String> {
+    let backup_path = sibling_work_path(source_path, "backup");
+    if let Err(error) = std::fs::rename(source_path, &backup_path) {
+        let _ = std::fs::remove_file(temp_path);
+        return Err(format!(
+            "创建原文件备份失败 {}: {}",
+            source_path.display(),
+            error
+        ));
+    }
+
+    if let Err(error) = std::fs::rename(temp_path, source_path) {
+        let restore_result = std::fs::rename(&backup_path, source_path);
+        let _ = std::fs::remove_file(temp_path);
+        return match restore_result {
+            Ok(()) => Err(format!("替换图片失败 {}: {}", source_path.display(), error)),
+            Err(restore_error) => Err(format!(
+                "替换图片失败且恢复原文件失败 {}: {}; 备份位于 {} ({})",
+                source_path.display(),
+                error,
+                backup_path.display(),
+                restore_error
+            )),
+        };
+    }
+
+    std::fs::remove_file(&backup_path).map_err(|error| {
+        format!(
+            "图片已调整，但清理备份失败 {}: {}",
+            backup_path.display(),
+            error
+        )
+    })
+}
+
+enum InstallNewFileError {
+    Conflict,
+    Other(String),
+}
+
+fn install_new_file_from_temp(
+    temp_path: &Path,
+    target_path: &Path,
+) -> Result<(), InstallNewFileError> {
+    match std::fs::hard_link(temp_path, target_path) {
+        Ok(()) => {
+            std::fs::remove_file(temp_path).map_err(|error| {
+                InstallNewFileError::Other(format!(
+                    "清理临时文件失败 {}: {}",
+                    temp_path.display(),
+                    error
+                ))
+            })?;
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let _ = std::fs::remove_file(temp_path);
+            Err(InstallNewFileError::Conflict)
+        }
+        Err(_) => {
+            let bytes = match std::fs::read(temp_path) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    let _ = std::fs::remove_file(temp_path);
+                    return Err(InstallNewFileError::Other(format!(
+                        "读取临时文件失败 {}: {}",
+                        temp_path.display(),
+                        error
+                    )));
+                }
+            };
+            let mut target = match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(target_path)
+            {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let _ = std::fs::remove_file(temp_path);
+                    return Err(InstallNewFileError::Conflict);
+                }
+                Err(error) => {
+                    let _ = std::fs::remove_file(temp_path);
+                    return Err(InstallNewFileError::Other(format!(
+                        "创建目标文件失败 {}: {}",
+                        target_path.display(),
+                        error
+                    )));
+                }
+            };
+            if let Err(error) = target.write_all(&bytes).and_then(|_| target.sync_all()) {
+                drop(target);
+                let _ = std::fs::remove_file(target_path);
+                let _ = std::fs::remove_file(temp_path);
+                return Err(InstallNewFileError::Other(format!(
+                    "写入目标文件失败 {}: {}",
+                    target_path.display(),
+                    error
+                )));
+            }
+            drop(target);
+            std::fs::remove_file(temp_path).map_err(|error| {
+                InstallNewFileError::Other(format!(
+                    "清理临时文件失败 {}: {}",
+                    temp_path.display(),
+                    error
+                ))
+            })?;
+            Ok(())
+        }
+    }
+}
+
+/// 就地调整普通图片；转换为 JPEG 时成功生成目标文件后删除原文件。
+pub fn resize_standard_image(
+    filepath: &str,
+    max_edge: u32,
+    convert_to_jpeg: bool,
+    enable_resize: bool,
+) -> Result<StandardResizeOutcome, String> {
+    let source_path = Path::new(filepath);
+    let source_format = standard_image_format(source_path)?;
+    let should_convert = convert_to_jpeg && source_format != StandardImageFormat::Jpeg;
+    let target_path = should_convert.then(|| source_path.with_extension("jpg"));
+
+    if let Some(target_path) = &target_path {
+        if target_path.exists() {
+            return Ok(StandardResizeOutcome::Conflict {
+                target_path: target_path.clone(),
+            });
+        }
+    }
+
+    let decoded = decode_standard_image(source_path, source_format)?;
+    let longest_edge = decoded.width().max(decoded.height());
+    let should_resize = enable_resize && longest_edge > max_edge;
+    if !should_resize && !should_convert {
+        return Ok(StandardResizeOutcome::Skipped);
+    }
+
+    let image_to_encode = if should_resize {
+        let scale = max_edge as f64 / longest_edge as f64;
+        let width = std::cmp::max(1, (decoded.width() as f64 * scale).round() as u32);
+        let height = std::cmp::max(1, (decoded.height() as f64 * scale).round() as u32);
+        decoded.resize_exact(width, height, image::imageops::FilterType::CatmullRom)
+    } else {
+        decoded
+    };
+
+    let output_format = if should_convert {
+        StandardImageFormat::Jpeg
+    } else {
+        source_format
+    };
+    let encoded = encode_standard_image(&image_to_encode, output_format)?;
+    let temp_path = write_complete_temp(source_path, &encoded)?;
+
+    let output_path = if let Some(target_path) = target_path {
+        match install_new_file_from_temp(&temp_path, &target_path) {
+            Ok(()) => {}
+            Err(InstallNewFileError::Conflict) => {
+                return Ok(StandardResizeOutcome::Conflict { target_path });
+            }
+            Err(InstallNewFileError::Other(error)) => return Err(error),
+        }
+        if let Err(error) = std::fs::remove_file(source_path) {
+            return Err(format!(
+                "已生成 {}，但删除源文件失败，源文件仍保留: {}",
+                target_path.display(),
+                error
+            ));
+        }
+        target_path
+    } else {
+        replace_source_with_temp(source_path, &temp_path)?;
+        source_path.to_path_buf()
+    };
+
+    Ok(StandardResizeOutcome::Processed {
+        resized: should_resize,
+        converted: should_convert,
+        output_path,
+    })
+}
+
 /// 将文件名的扩展名替换为 `.png`（用于 AVIF 子图转 PNG 后的命名）。
 fn with_png_extension(filename: &str) -> String {
     let stem = Path::new(filename)
@@ -796,6 +1177,58 @@ pub fn scan_ims_files(dir: &str, max_depth: u32) -> Vec<String> {
         })
         .map(|e| e.path().to_string_lossy().to_string())
         .collect()
+}
+
+/// 为批量调整任务生成稳定的去重键；保留原路径用于处理和展示。
+pub fn resize_file_identity_key(path: &str) -> String {
+    let normalized = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
+    let key = normalized.to_string_lossy().into_owned();
+    #[cfg(windows)]
+    {
+        key.to_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        key
+    }
+}
+
+/// 扫描批量调整任务，先识别 IMS，再按扩展名识别普通图片。
+pub fn scan_resize_files(dir: &str, max_depth: u32, scope: ResizeFileScope) -> Vec<ResizeFileTask> {
+    use crate::ims::is_ims_file;
+
+    let mut walker = walkdir::WalkDir::new(dir);
+    if max_depth > 0 {
+        walker = walker.max_depth(max_depth as usize);
+    }
+
+    let mut tasks: Vec<ResizeFileTask> = walker
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_file())
+        .filter_map(|entry| {
+            let path = entry.path();
+            let path_string = path.to_string_lossy().to_string();
+            let kind = if is_ims_file(&path_string) {
+                ResizeFileKind::Ims
+            } else if standard_image_format(path).is_ok() {
+                ResizeFileKind::Standard
+            } else {
+                return None;
+            };
+            scope.includes(kind).then_some(ResizeFileTask {
+                path: path_string,
+                kind,
+            })
+        })
+        .collect();
+    tasks.sort_by(|left, right| {
+        left.path
+            .to_lowercase()
+            .cmp(&right.path.to_lowercase())
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    tasks
 }
 
 /// 直接写入 IMS v2 文件（内部用，接受已读取的字节数据）
@@ -1785,5 +2218,219 @@ mod tests {
             .unwrap();
         let decoded = image::load_from_memory(&sub).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (400, 300), "应缩小");
+    }
+
+    #[test]
+    fn standard_image_resizes_oversized_jpeg_and_preserves_aspect() {
+        let dir = tempdir().unwrap();
+        let path = write_temp_image(&dir, "photo.jpg", 800, 600, false);
+
+        let outcome = resize_standard_image(&path, 400, false, true).unwrap();
+
+        assert!(matches!(
+            outcome,
+            StandardResizeOutcome::Processed {
+                resized: true,
+                converted: false,
+                ..
+            }
+        ));
+        let decoded = image::open(&path).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (400, 300));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn standard_image_skips_undersized_file_without_rewriting() {
+        let dir = tempdir().unwrap();
+        let path = write_temp_image(&dir, "photo.png", 100, 80, true);
+        let original = std::fs::read(&path).unwrap();
+
+        let outcome = resize_standard_image(&path, 400, false, true).unwrap();
+
+        assert!(matches!(outcome, StandardResizeOutcome::Skipped));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn standard_image_converts_png_to_jpeg_then_removes_source() {
+        let dir = tempdir().unwrap();
+        let path = write_temp_image(&dir, "photo.png", 100, 80, true);
+        let jpeg_path = dir.path().join("photo.jpg");
+
+        let outcome = resize_standard_image(&path, 400, true, false).unwrap();
+
+        assert!(matches!(
+            outcome,
+            StandardResizeOutcome::Processed {
+                resized: false,
+                converted: true,
+                ..
+            }
+        ));
+        assert!(!Path::new(&path).exists());
+        assert!(jpeg_path.exists());
+        assert_eq!(
+            image::open(jpeg_path).unwrap().color(),
+            image::ColorType::Rgb8
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn standard_image_reports_existing_jpeg_target_without_changes() {
+        let dir = tempdir().unwrap();
+        let path = write_temp_image(&dir, "photo.png", 100, 80, false);
+        let jpeg_path = write_temp_image(&dir, "photo.jpg", 50, 40, false);
+        let source_before = std::fs::read(&path).unwrap();
+        let target_before = std::fs::read(&jpeg_path).unwrap();
+
+        let outcome = resize_standard_image(&path, 400, true, false).unwrap();
+
+        assert!(matches!(
+            outcome,
+            StandardResizeOutcome::Conflict { ref target_path }
+                if target_path == Path::new(&jpeg_path)
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), source_before);
+        assert_eq!(std::fs::read(&jpeg_path).unwrap(), target_before);
+    }
+
+    #[test]
+    fn standard_image_resizes_webp_without_changing_format() {
+        let dir = tempdir().unwrap();
+        let path = write_temp_image(&dir, "photo.webp", 800, 600, true);
+
+        let outcome = resize_standard_image(&path, 400, false, true).unwrap();
+
+        assert!(matches!(
+            outcome,
+            StandardResizeOutcome::Processed {
+                resized: true,
+                converted: false,
+                ref output_path,
+            } if output_path == Path::new(&path)
+        ));
+        let decoded = image::open(&path).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (400, 300));
+        assert_eq!(decoded.color(), image::ColorType::Rgba8);
+    }
+
+    #[test]
+    fn standard_image_resizes_avif_without_changing_format() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("photo.avif");
+        let source = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            800,
+            600,
+            image::Rgba([100, 120, 140, 128]),
+        ));
+        std::fs::write(&path, avif::encode(&source).unwrap()).unwrap();
+
+        let outcome = resize_standard_image(&path.to_string_lossy(), 400, false, true).unwrap();
+
+        assert!(matches!(
+            outcome,
+            StandardResizeOutcome::Processed {
+                resized: true,
+                converted: false,
+                ref output_path,
+            } if output_path == &path
+        ));
+        let decoded = decode_avif(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (400, 300));
+        assert_eq!(decoded.color(), image::ColorType::Rgba8);
+    }
+
+    fn scanned_names(dir: &Path, scope: ResizeFileScope) -> Vec<(String, ResizeFileKind)> {
+        scan_resize_files(&dir.to_string_lossy(), 0, scope)
+            .into_iter()
+            .map(|task| {
+                (
+                    Path::new(&task.path)
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .to_string(),
+                    task.kind,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn resize_scan_scope_classifies_ims_before_extension() {
+        let dir = tempdir().unwrap();
+        for name in [
+            "a.ims",
+            "b.ims.png",
+            "c.jpg",
+            "d.PNG",
+            "e.webp",
+            "f.avif",
+            "notes.txt",
+        ] {
+            std::fs::write(dir.path().join(name), b"test").unwrap();
+        }
+
+        assert_eq!(
+            scanned_names(dir.path(), ResizeFileScope::ImsOnly),
+            vec![
+                ("a.ims".into(), ResizeFileKind::Ims),
+                ("b.ims.png".into(), ResizeFileKind::Ims),
+            ]
+        );
+        assert_eq!(
+            scanned_names(dir.path(), ResizeFileScope::StandardOnly),
+            vec![
+                ("c.jpg".into(), ResizeFileKind::Standard),
+                ("d.PNG".into(), ResizeFileKind::Standard),
+                ("e.webp".into(), ResizeFileKind::Standard),
+                ("f.avif".into(), ResizeFileKind::Standard),
+            ]
+        );
+    }
+
+    #[test]
+    fn resize_scan_scope_all_includes_both_file_kinds() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("container.ims.jpg"), b"test").unwrap();
+        std::fs::write(dir.path().join("photo.jpeg"), b"test").unwrap();
+
+        assert_eq!(
+            scanned_names(dir.path(), ResizeFileScope::All),
+            vec![
+                ("container.ims.jpg".into(), ResizeFileKind::Ims),
+                ("photo.jpeg".into(), ResizeFileKind::Standard),
+            ]
+        );
+    }
+
+    #[test]
+    fn resize_file_identity_key_normalizes_alias_paths() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("photo.jpg");
+        std::fs::write(&path, b"test").unwrap();
+        let alias = dir.path().join(".").join("photo.jpg");
+
+        assert_eq!(
+            resize_file_identity_key(&path.to_string_lossy()),
+            resize_file_identity_key(&alias.to_string_lossy())
+        );
+    }
+
+    #[test]
+    fn resize_config_defaults_to_ims_only_scope() {
+        let config: BatchResizeConfig = serde_json::from_value(serde_json::json!({
+            "folders": [],
+            "max_edge": 2560,
+            "multi_threaded": false,
+            "convert_to_jpeg": false,
+            "enable_resize": true
+        }))
+        .unwrap();
+
+        assert_eq!(config.file_scope, ResizeFileScope::ImsOnly);
+        assert!(config.job_id.is_empty());
     }
 }

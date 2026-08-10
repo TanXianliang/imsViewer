@@ -1349,12 +1349,87 @@ function setupBatchEvents() {
 
 // ===== 批量调整分辨率模态框 =====
 let resizeUnlisten = null;
+let resizeIssues = [];
+
+const resizeScopeLabels = {
+  ims_only: 'IMS 文件',
+  standard_only: '非 IMS 图片',
+  all: 'IMS 和非 IMS 图片',
+};
+
+function resetResizeResult() {
+  resizeIssues = [];
+  $('#resize-result').hidden = true;
+  $('#resize-issue-list').hidden = true;
+  $('#resize-issue-list').innerHTML = '';
+  $('#btn-copy-resize-issues').hidden = true;
+  $('#btn-copy-resize-issues').textContent = '复制未处理清单';
+  $('#resize-success-count').textContent = '0';
+  $('#resize-skipped-count').textContent = '0';
+  $('#resize-failed-count').textContent = '0';
+}
+
+function renderResizeResult(payload) {
+  resizeIssues = Array.isArray(payload.issues) ? payload.issues : [];
+  $('#resize-success-count').textContent = String(payload.succeeded ?? 0);
+  $('#resize-skipped-count').textContent = String(payload.skipped ?? 0);
+  $('#resize-failed-count').textContent = String(payload.failed ?? 0);
+  $('#resize-result').hidden = false;
+
+  const list = $('#resize-issue-list');
+  list.innerHTML = '';
+  list.hidden = resizeIssues.length === 0;
+  $('#btn-copy-resize-issues').hidden = resizeIssues.length === 0;
+  if (resizeIssues.length === 0) return;
+
+  const fragment = document.createDocumentFragment();
+  resizeIssues.forEach(issue => {
+    const row = document.createElement('div');
+    row.className = 'resize-issue-row';
+
+    const kind = document.createElement('span');
+    kind.className = 'resize-issue-kind' + (issue.kind === '失败' ? ' is-failed' : '');
+    kind.textContent = issue.kind || '未处理';
+
+    const detail = document.createElement('div');
+    detail.className = 'resize-issue-detail';
+    const path = document.createElement('div');
+    path.className = 'resize-issue-path';
+    path.textContent = issue.path || '--';
+    path.title = issue.path || '';
+    const reason = document.createElement('div');
+    reason.className = 'resize-issue-reason';
+    reason.textContent = issue.reason || '未知原因';
+    detail.append(path, reason);
+
+    row.append(kind, detail);
+    fragment.appendChild(row);
+  });
+  list.appendChild(fragment);
+}
+
+async function copyResizeIssues() {
+  if (resizeIssues.length === 0) return;
+  const text = resizeIssues
+    .map(issue => `${issue.kind || '未处理'}\t${issue.path || ''}\t${issue.reason || ''}`)
+    .join('\n');
+  const button = $('#btn-copy-resize-issues');
+  try {
+    await navigator.clipboard.writeText(text);
+    button.textContent = '已复制';
+    setTimeout(() => { button.textContent = '复制未处理清单'; }, 1500);
+  } catch (error) {
+    console.error('复制未处理清单失败:', error);
+    alert('复制失败，请从清单中手动选择文本');
+  }
+}
 
 function openResizeModal() {
   const modal = $('#resize-modal');
   modal.style.display = 'flex';
   $('#resize-folder-list').innerHTML = '';
   addResizeFolderRow();
+  $('#resize-file-scope').value = 'ims_only';
   $('#resize-max-edge').value = '2560';
   $('#chk-resize-enable').checked = true;
   $('#resize-max-edge').disabled = false;
@@ -1362,6 +1437,7 @@ function openResizeModal() {
   $('#resize-progress-text').textContent = '准备就绪';
   $('#btn-start-resize').disabled = false;
   $('#btn-start-resize').textContent = '开始调整';
+  resetResizeResult();
   setupResizeEvents();
 }
 
@@ -1409,6 +1485,7 @@ function collectResizeConfig() {
     multi_threaded: $('#chk-resize-multi').checked,
     convert_to_jpeg: $('#chk-resize-to-jpeg').checked,
     enable_resize: $('#chk-resize-enable').checked,
+    file_scope: $('#resize-file-scope').value,
   };
 }
 
@@ -1433,12 +1510,18 @@ async function startBatchResize() {
   const btn = $('#btn-start-resize');
   btn.disabled = true;
   btn.textContent = '调整中...';
-  $('#resize-progress-text').textContent = '正在扫描 IMS 文件...';
+  resetResizeResult();
+  const scopeLabel = resizeScopeLabels[config.file_scope] || '图片';
+  $('#resize-progress-text').textContent = `正在扫描${scopeLabel}...`;
+  const jobId = globalThis.crypto?.randomUUID?.()
+    ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  config.job_id = jobId;
 
   try {
     if (resizeUnlisten) resizeUnlisten();
-    resizeUnlisten = await listen('batch-progress', (event) => {
+    resizeUnlisten = await listen('batch-resize-progress', (event) => {
       const p = event.payload;
+      if (p.job_id !== jobId) return;
       const pct = p.total > 0 ? Math.round((p.current / p.total) * 100) : 0;
       $('#resize-progress-fill').style.width = pct + '%';
       $('#resize-progress-text').textContent = `[${p.current}/${p.total}] ${p.message}`;
@@ -1446,16 +1529,27 @@ async function startBatchResize() {
       if (p.status === 'completed' || p.status === 'error') {
         btn.disabled = false;
         btn.textContent = '开始调整';
+        if (p.status === 'completed') renderResizeResult(p);
+        const hasIssues = (p.failed ?? 0) > 0 || (Array.isArray(p.issues) && p.issues.length > 0);
         $('#resize-progress-text').textContent =
-          (p.status === 'completed' ? '✅ ' : '⚠️ ') + p.message;
+          (p.status === 'completed' && !hasIssues ? '✅ ' : '⚠️ ') + p.message;
+        if (resizeUnlisten) {
+          resizeUnlisten();
+          resizeUnlisten = null;
+        }
       }
     });
 
     await invoke('start_batch_resize', { config });
   } catch (err) {
+    if (resizeUnlisten) {
+      resizeUnlisten();
+      resizeUnlisten = null;
+    }
     alert('启动调整失败: ' + err);
     btn.disabled = false;
     btn.textContent = '开始调整';
+    $('#resize-progress-text').textContent = '启动失败: ' + err;
   }
 }
 
@@ -1464,6 +1558,7 @@ function setupResizeEvents() {
   $('#btn-resize-close').onclick = () => closeResizeModal();
   $('#btn-cancel-resize').onclick = () => closeResizeModal();
   $('#btn-start-resize').onclick = () => startBatchResize();
+  $('#btn-copy-resize-issues').onclick = () => copyResizeIssues();
   $('#chk-resize-enable').onchange = () => {
     $('#resize-max-edge').disabled = !$('#chk-resize-enable').checked;
   };

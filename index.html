@@ -393,15 +393,23 @@
   <div id="resize-modal" class="modal-overlay" style="display:none">
     <div class="modal-container">
       <div class="modal-header">
-        <span>批量调整 IMS 子图分辨率</span>
+        <span>批量调整图片分辨率</span>
         <button class="btn-modal-close" id="btn-resize-close">&times;</button>
       </div>
       <div class="modal-body">
         <div id="resize-folder-list"></div>
         <button id="btn-resize-add-folder" class="btn-secondary">+ 添加文件夹</button>
         <div class="output-dir-row">
+          <label for="resize-file-scope">处理范围</label>
+          <select id="resize-file-scope" class="resize-scope-select">
+            <option value="ims_only">仅 IMS</option>
+            <option value="standard_only">仅非 IMS</option>
+            <option value="all">全部</option>
+          </select>
+        </div>
+        <div class="output-dir-row">
           <label>最长边分辨率 (px)</label>
-          <input class="depth-input" id="resize-max-edge" type="number" min="64" value="2560" title="仅缩小最长边超过此值的子图，保持长宽比；不放大" />
+          <input class="depth-input" id="resize-max-edge" type="number" min="64" value="2560" title="仅缩小最长边超过此值的图片，保持长宽比；不放大" />
         </div>
         <div class="modal-options">
           <label><input type="checkbox" id="chk-resize-enable" checked> 调整分辨率</label>
@@ -413,6 +421,17 @@
             <div class="progress-bar-fill" id="resize-progress-fill"></div>
           </div>
           <div class="progress-text" id="resize-progress-text">准备就绪</div>
+        </div>
+        <div id="resize-result" class="resize-result" hidden>
+          <div class="resize-result-header">
+            <div class="resize-result-counts" aria-live="polite">
+              <span class="resize-count resize-count-success">成功 <strong id="resize-success-count">0</strong></span>
+              <span class="resize-count resize-count-skipped">跳过 <strong id="resize-skipped-count">0</strong></span>
+              <span class="resize-count resize-count-failed">失败 <strong id="resize-failed-count">0</strong></span>
+            </div>
+            <button id="btn-copy-resize-issues" class="btn-secondary" hidden>复制未处理清单</button>
+          </div>
+          <div id="resize-issue-list" class="resize-issue-list" hidden></div>
         </div>
       </div>
       <div class="modal-footer">
