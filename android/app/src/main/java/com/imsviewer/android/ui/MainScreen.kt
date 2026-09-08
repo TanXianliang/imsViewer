@@ -103,6 +103,7 @@ import com.imsviewer.android.domain.model.OpenRecordKind
 import com.imsviewer.android.domain.model.RemoteEntry
 import com.imsviewer.android.domain.model.ScreenState
 import com.imsviewer.android.domain.model.ViewerImage
+import com.imsviewer.android.domain.wrappedAdjacentIndex
 import com.imsviewer.android.util.SizeFormatter
 import com.imsviewer.android.viewmodel.ViewerViewModel
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -174,6 +175,32 @@ fun MainScreen(
                 val image = state.currentImage
                 if (image != null) {
                     val hasRemoteSequence = state.remoteConnection != null && state.remoteFileSequence.isNotEmpty()
+                    val activeFileIndex = if (hasRemoteSequence) {
+                        state.remoteFileIndex.coerceAtLeast(0)
+                    } else {
+                        state.fileIndex
+                    }
+                    val activeFileCount = if (hasRemoteSequence) {
+                        state.remoteFileSequence.size
+                    } else {
+                        state.fileSequence.size.coerceAtLeast(1)
+                    }
+                    val previousFileIndex = wrappedAdjacentIndex(activeFileIndex, activeFileCount, -1)
+                    val nextFileIndex = wrappedAdjacentIndex(activeFileIndex, activeFileCount, 1)
+                    val previousFilePreview = previousFileIndex?.let { index ->
+                        if (hasRemoteSequence) {
+                            state.remoteFileSequence.getOrNull(index)?.let { state.remoteThumbnails[it.path] }
+                        } else {
+                            state.fileSequence.getOrNull(index)?.let { state.folderThumbnails[it] }
+                        }
+                    }
+                    val nextFilePreview = nextFileIndex?.let { index ->
+                        if (hasRemoteSequence) {
+                            state.remoteFileSequence.getOrNull(index)?.let { state.remoteThumbnails[it.path] }
+                        } else {
+                            state.fileSequence.getOrNull(index)?.let { state.folderThumbnails[it] }
+                        }
+                    }
                     BackHandler(
                         onBack = if (state.folderSequence.isNotEmpty()) {
                             viewModel::showFolder
@@ -188,12 +215,10 @@ fun MainScreen(
                         isUiVisible = state.isUiVisible,
                         isSwitchingFile = state.isSwitchingFile,
                         isSwitchingSubImage = state.isSwitchingSubImage,
-                        fileIndex = if (hasRemoteSequence) state.remoteFileIndex.coerceAtLeast(0) else state.fileIndex,
-                        fileCount = if (hasRemoteSequence) {
-                            state.remoteFileSequence.size
-                        } else {
-                            state.fileSequence.size.coerceAtLeast(1)
-                        },
+                        fileIndex = activeFileIndex,
+                        fileCount = activeFileCount,
+                        previousFilePreview = previousFilePreview,
+                        nextFilePreview = nextFilePreview,
                         thumbnails = state.thumbnails,
                         onToggleChrome = viewModel::toggleChrome,
                         onHome = when {
@@ -1018,6 +1043,8 @@ private fun ViewerScreen(
     isSwitchingSubImage: Boolean,
     fileIndex: Int,
     fileCount: Int,
+    previousFilePreview: Bitmap?,
+    nextFilePreview: Bitmap?,
     thumbnails: Map<Int, Bitmap>,
     onToggleChrome: () -> Unit,
     onHome: () -> Unit,
@@ -1029,6 +1056,11 @@ private fun ViewerScreen(
     onPreviousFile: () -> Unit,
     onNextFile: () -> Unit
 ) {
+    var isFileSwipeSettling by remember(image.uri) { mutableStateOf(false) }
+    val guardedSubImageSelected: (Int) -> Unit = { index ->
+        if (!isFileSwipeSettling && !isSwitchingFile) onSubImageSelected(index)
+    }
+
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val isLandscape = maxWidth > maxHeight
 
@@ -1043,13 +1075,18 @@ private fun ViewerScreen(
                         onShowInfo = onShowInfo,
                         onShare = onShare,
                         thumbnails = thumbnails,
-                        onSubImageSelected = onSubImageSelected
+                        onSubImageSelected = guardedSubImageSelected
                     )
                 }
                 ImageCanvas(
                     image = image,
                     thumbnails = thumbnails,
+                    isSwitchingFile = isSwitchingFile,
                     isSwitchingSubImage = isSwitchingSubImage,
+                    fileCount = fileCount,
+                    previousFilePreview = previousFilePreview,
+                    nextFilePreview = nextFilePreview,
+                    onFileSwipeSettlingChange = { isFileSwipeSettling = it },
                     modifier = Modifier.weight(1f).fillMaxHeight(),
                     onTap = onToggleChrome,
                     onPreviousSubImage = onPreviousSubImage,
@@ -1062,7 +1099,12 @@ private fun ViewerScreen(
             ImageCanvas(
                 image = image,
                 thumbnails = thumbnails,
+                isSwitchingFile = isSwitchingFile,
                 isSwitchingSubImage = isSwitchingSubImage,
+                fileCount = fileCount,
+                previousFilePreview = previousFilePreview,
+                nextFilePreview = nextFilePreview,
+                onFileSwipeSettlingChange = { isFileSwipeSettling = it },
                 modifier = Modifier.fillMaxSize(),
                 onTap = onToggleChrome,
                 onPreviousSubImage = onPreviousSubImage,
@@ -1092,7 +1134,7 @@ private fun ViewerScreen(
                         image = image,
                         thumbnails = thumbnails,
                         vertical = false,
-                        onSubImageSelected = onSubImageSelected
+                        onSubImageSelected = guardedSubImageSelected
                     )
                 }
             }
@@ -1123,7 +1165,12 @@ private fun ViewerScreen(
 private fun ImageCanvas(
     image: ViewerImage,
     thumbnails: Map<Int, Bitmap>,
+    isSwitchingFile: Boolean,
     isSwitchingSubImage: Boolean,
+    fileCount: Int,
+    previousFilePreview: Bitmap?,
+    nextFilePreview: Bitmap?,
+    onFileSwipeSettlingChange: (Boolean) -> Unit,
     modifier: Modifier,
     onTap: () -> Unit,
     onPreviousSubImage: () -> Unit,
@@ -1133,7 +1180,9 @@ private fun ImageCanvas(
 ) {
     var scale by remember(image.uri, image.subImageIndex) { mutableFloatStateOf(1f) }
     var offset by remember(image.uri, image.subImageIndex) { mutableStateOf(Offset.Zero) }
+    var horizontalSwipeOffset by remember(image.uri, image.subImageIndex) { mutableFloatStateOf(0f) }
     var verticalSwipeOffset by remember(image.uri, image.subImageIndex) { mutableFloatStateOf(0f) }
+    var awaitingFileChange by remember(image.uri, image.subImageIndex) { mutableStateOf(false) }
     var awaitingSubImageChange by remember(image.uri, image.subImageIndex) { mutableStateOf(false) }
 
     BoxWithConstraints(modifier.background(Color.Black)) {
@@ -1155,8 +1204,25 @@ private fun ImageCanvas(
         LaunchedEffect(image.uri, image.subImageIndex, viewportWidth, viewportHeight) {
             scale = 1f
             offset = Offset.Zero
+            horizontalSwipeOffset = 0f
             verticalSwipeOffset = 0f
+            awaitingFileChange = false
             awaitingSubImageChange = false
+        }
+
+        LaunchedEffect(isSwitchingFile) {
+            if (!isSwitchingFile && awaitingFileChange) {
+                animate(
+                    initialValue = horizontalSwipeOffset,
+                    targetValue = 0f,
+                    animationSpec = spring(
+                        dampingRatio = Spring.DampingRatioNoBouncy,
+                        stiffness = Spring.StiffnessMedium
+                    )
+                ) { value, _ -> horizontalSwipeOffset = value }
+                awaitingFileChange = false
+                onFileSwipeSettlingChange(false)
+            }
         }
 
         LaunchedEffect(isSwitchingSubImage) {
@@ -1200,9 +1266,10 @@ private fun ImageCanvas(
                     image.subImageIndex,
                     viewportWidth,
                     viewportHeight,
+                    isSwitchingFile,
                     isSwitchingSubImage
                 ) {
-                    if (isSwitchingSubImage) return@pointerInput
+                    if (isSwitchingFile || isSwitchingSubImage) return@pointerInput
                     while (true) {
                         val gesture = awaitPointerEventScope {
                             val down = awaitFirstDown(requireUnconsumed = false)
@@ -1225,6 +1292,7 @@ private fun ImageCanvas(
                                     hadMultiTouch = true
                                     singleFingerDrag = Offset.Zero
                                     swipeAxis = SwipeAxis.Undecided
+                                    horizontalSwipeOffset = 0f
                                     verticalSwipeOffset = 0f
                                     val zoom = event.calculateZoomFactor()
                                     val pan = event.calculateAveragePan()
@@ -1273,6 +1341,11 @@ private fun ImageCanvas(
                                                 verticalSwipeOffset = singleFingerDrag.y.coerceIn(
                                                     -viewportHeight,
                                                     viewportHeight
+                                                )
+                                            } else if (swipeAxis == SwipeAxis.Horizontal) {
+                                                horizontalSwipeOffset = singleFingerDrag.x.coerceIn(
+                                                    -viewportWidth,
+                                                    viewportWidth
                                                 )
                                             }
                                         }
@@ -1329,25 +1402,125 @@ private fun ImageCanvas(
                                         onPreviousSubImage()
                                     }
                                 }
-                                FitModeSwipeAction.PreviousFile -> onPreviousFile()
-                                FitModeSwipeAction.NextFile -> onNextFile()
-                                FitModeSwipeAction.None -> animate(
-                                    initialValue = verticalSwipeOffset,
-                                    targetValue = 0f,
-                                    animationSpec = spring(
-                                        dampingRatio = Spring.DampingRatioNoBouncy,
-                                        stiffness = Spring.StiffnessMedium
-                                    )
-                                ) { value, _ -> verticalSwipeOffset = value }
+                                FitModeSwipeAction.PreviousFile,
+                                FitModeSwipeAction.NextFile -> {
+                                    if (fileCount > 1) {
+                                        awaitingFileChange = true
+                                        onFileSwipeSettlingChange(true)
+                                        var navigationRequested = false
+                                        try {
+                                            animate(
+                                                initialValue = horizontalSwipeOffset,
+                                                targetValue = if (action == FitModeSwipeAction.NextFile) {
+                                                    -viewportWidth
+                                                } else {
+                                                    viewportWidth
+                                                },
+                                                animationSpec = tween(durationMillis = 180)
+                                            ) { value, _ -> horizontalSwipeOffset = value }
+                                            navigationRequested = true
+                                        if (action == FitModeSwipeAction.NextFile) {
+                                            onNextFile()
+                                        } else {
+                                            onPreviousFile()
+                                        }
+                                    } finally {
+                                            if (!navigationRequested) {
+                                                horizontalSwipeOffset = 0f
+                                                awaitingFileChange = false
+                                                onFileSwipeSettlingChange(false)
+                                            }
+                                        }
+                                    } else {
+                                        onFileSwipeSettlingChange(true)
+                                        try {
+                                            animate(
+                                                initialValue = horizontalSwipeOffset,
+                                                targetValue = 0f,
+                                                animationSpec = spring(
+                                                    dampingRatio = Spring.DampingRatioNoBouncy,
+                                                    stiffness = Spring.StiffnessMedium
+                                                )
+                                            ) { value, _ -> horizontalSwipeOffset = value }
+                                        } finally {
+                                            horizontalSwipeOffset = 0f
+                                            onFileSwipeSettlingChange(false)
+                                        }
+                                    }
+                                }
+                                FitModeSwipeAction.None -> {
+                                    if (abs(horizontalSwipeOffset) > 0.5f) {
+                                        onFileSwipeSettlingChange(true)
+                                        try {
+                                            animate(
+                                                initialValue = horizontalSwipeOffset,
+                                                targetValue = 0f,
+                                                animationSpec = spring(
+                                                    dampingRatio = Spring.DampingRatioNoBouncy,
+                                                    stiffness = Spring.StiffnessMedium
+                                                )
+                                            ) { value, _ -> horizontalSwipeOffset = value }
+                                        } finally {
+                                            horizontalSwipeOffset = 0f
+                                            onFileSwipeSettlingChange(false)
+                                        }
+                                    } else {
+                                        horizontalSwipeOffset = 0f
+                                    }
+                                    animate(
+                                        initialValue = verticalSwipeOffset,
+                                        targetValue = 0f,
+                                        animationSpec = spring(
+                                            dampingRatio = Spring.DampingRatioNoBouncy,
+                                            stiffness = Spring.StiffnessMedium
+                                        )
+                                    ) { value, _ -> verticalSwipeOffset = value }
+                                }
                             }
                         } else {
+                            horizontalSwipeOffset = 0f
                             verticalSwipeOffset = 0f
                         }
                     }
                 },
             contentAlignment = Alignment.Center
         ) {
+            val swipeOffsetX = horizontalSwipeOffset
             val swipeOffsetY = verticalSwipeOffset
+            val targetFilePreview = when {
+                swipeOffsetX < -0.5f -> nextFilePreview
+                swipeOffsetX > 0.5f -> previousFilePreview
+                else -> null
+            }
+            if (abs(swipeOffsetX) > 0.5f && fileCount > 1) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer {
+                            translationX = swipeOffsetX + if (swipeOffsetX < 0f) {
+                                viewportWidth
+                            } else {
+                                -viewportWidth
+                            }
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (targetFilePreview != null) {
+                        Image(
+                            bitmap = targetFilePreview.asImageBitmap(),
+                            contentDescription = null,
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Fit
+                        )
+                    } else {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(24.dp),
+                            color = Color.White,
+                            strokeWidth = 2.dp
+                        )
+                    }
+                }
+            }
             val targetSubImageIndex = when {
                 swipeOffsetY < -0.5f -> (image.subImageIndex + 1) % image.subImageCount
                 swipeOffsetY > 0.5f -> (image.subImageIndex - 1 + image.subImageCount) % image.subImageCount
@@ -1391,7 +1564,7 @@ private fun ImageCanvas(
                     .graphicsLayer {
                         scaleX = scale
                         scaleY = scale
-                        translationX = offset.x
+                        translationX = offset.x + swipeOffsetX
                         translationY = offset.y + swipeOffsetY
                     },
                 contentScale = ContentScale.Fit

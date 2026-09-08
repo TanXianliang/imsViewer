@@ -91,6 +91,42 @@ class FitModeSwipeTest {
     }
 
     @Test
+    fun shortFastLeftFlickOpensNextFile() {
+        val action = resolveFitModeSwipe(
+            axis = SwipeAxis.Horizontal,
+            dragX = -42f,
+            dragY = 10f,
+            velocityX = -1_800f,
+            velocityY = 100f,
+            horizontalDistanceThreshold = 80f,
+            verticalDistanceThreshold = 80f,
+            minimumFlingDistance = 24f,
+            flingVelocityThreshold = 1_200f,
+            hasSubImages = false
+        )
+
+        assertEquals(FitModeSwipeAction.NextFile, action)
+    }
+
+    @Test
+    fun slowShortHorizontalDragSettlesBack() {
+        val action = resolveFitModeSwipe(
+            axis = SwipeAxis.Horizontal,
+            dragX = 36f,
+            dragY = 8f,
+            velocityX = 300f,
+            velocityY = 0f,
+            horizontalDistanceThreshold = 80f,
+            verticalDistanceThreshold = 80f,
+            minimumFlingDistance = 24f,
+            flingVelocityThreshold = 1_200f,
+            hasSubImages = false
+        )
+
+        assertEquals(FitModeSwipeAction.None, action)
+    }
+
+    @Test
     fun diagonalVerticalDragOnRegularImageDoesNotNavigateFiles() {
         val axis = resolveSwipeAxis(
             dragX = 100f,

@@ -9,6 +9,7 @@ import androidx.lifecycle.viewModelScope
 import com.imsviewer.android.data.ImageRepository
 import com.imsviewer.android.data.SecurePasswordStore
 import com.imsviewer.android.data.SftpRepository
+import com.imsviewer.android.domain.wrappedAdjacentIndex
 import com.imsviewer.android.domain.model.OpenRecord
 import com.imsviewer.android.domain.model.OpenRecordKind
 import com.imsviewer.android.domain.model.RemoteConnection
@@ -37,6 +38,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
     private var loadJob: Job? = null
     private var thumbnailJob: Job? = null
     private var folderThumbnailJob: Job? = null
+    private var adjacentFilePreviewJob: Job? = null
     private var remoteThumbnailJob: Job? = null
     private var remoteVisibleRange: IntRange? = null
     private val sessionPasswords = mutableMapOf<String, String>()
@@ -184,6 +186,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
     fun showHome() {
         loadJob?.cancel()
         folderThumbnailJob?.cancel()
+        adjacentFilePreviewJob?.cancel()
         remoteThumbnailJob?.cancel()
         remoteVisibleRange = null
         _uiState.update {
@@ -607,6 +610,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
                         )
                     }
                     loadThumbnails(image)
+                    loadAdjacentFilePreviews(normalizedSequence, currentIndex)
                 }
                 .onFailure { error ->
                     val message = error.message ?: "Failed to open file"
@@ -674,6 +678,9 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
                     )
                 }
                 loadThumbnails(image)
+                if (remoteIndex == null) {
+                    loadAdjacentFilePreviews(sequence, index)
+                }
             }
             .onFailure { error ->
                 _uiState.update {
@@ -697,7 +704,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
     fun openSubImage(index: Int) {
         val state = _uiState.value
         val current = state.currentImage ?: return
-        if (state.isSwitchingSubImage) return
+        if (state.isSwitchingFile || state.isSwitchingSubImage) return
         if (current.imsFile == null || index !in current.imsFile.entries.indices || index == current.subImageIndex) {
             return
         }
@@ -747,28 +754,25 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
     fun openNextFile() {
         val state = _uiState.value
         if (openAdjacentRemoteFile(state, direction = 1)) return
-        if (state.fileSequence.size <= 1) return
-        val nextIndex = (state.fileIndex + 1).coerceAtMost(state.fileSequence.lastIndex)
-        if (nextIndex != state.fileIndex) openUriFromSequence(state.fileSequence[nextIndex], state.fileSequence, nextIndex)
+        if (state.isSwitchingFile || state.isSwitchingSubImage) return
+        val nextIndex = wrappedAdjacentIndex(state.fileIndex, state.fileSequence.size, 1) ?: return
+        openUriFromSequence(state.fileSequence[nextIndex], state.fileSequence, nextIndex)
     }
 
     fun openPreviousFile() {
         val state = _uiState.value
         if (openAdjacentRemoteFile(state, direction = -1)) return
-        if (state.fileSequence.size <= 1) return
-        val previousIndex = (state.fileIndex - 1).coerceAtLeast(0)
-        if (previousIndex != state.fileIndex) {
-            openUriFromSequence(state.fileSequence[previousIndex], state.fileSequence, previousIndex)
-        }
+        if (state.isSwitchingFile || state.isSwitchingSubImage) return
+        val previousIndex = wrappedAdjacentIndex(state.fileIndex, state.fileSequence.size, -1) ?: return
+        openUriFromSequence(state.fileSequence[previousIndex], state.fileSequence, previousIndex)
     }
 
     private fun openAdjacentRemoteFile(state: ViewerUiState, direction: Int): Boolean {
         val connection = state.remoteConnection ?: return false
         val sequence = state.remoteFileSequence
         if (sequence.isEmpty() || state.remoteFileIndex !in sequence.indices) return false
-        if (state.isSwitchingFile || state.isRemoteBusy) return true
-        val targetIndex = (state.remoteFileIndex + direction).coerceIn(sequence.indices)
-        if (targetIndex == state.remoteFileIndex) return true
+        if (state.isSwitchingFile || state.isSwitchingSubImage || state.isRemoteBusy) return true
+        val targetIndex = wrappedAdjacentIndex(state.remoteFileIndex, sequence.size, direction) ?: return true
         downloadRemoteFile(
             connection = connection,
             entry = sequence[targetIndex],
@@ -1038,6 +1042,48 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
                             state.copy(failedFolderThumbnails = state.failedFolderThumbnails + uri)
                         }
                     }
+            }
+        }
+    }
+
+    private fun loadAdjacentFilePreviews(sequence: List<Uri>, currentIndex: Int) {
+        val previewUris = listOfNotNull(
+            wrappedAdjacentIndex(currentIndex, sequence.size, -1)?.let(sequence::getOrNull),
+            wrappedAdjacentIndex(currentIndex, sequence.size, 1)?.let(sequence::getOrNull)
+        ).distinct()
+        if (previewUris.isEmpty()) return
+
+        adjacentFilePreviewJob?.cancel()
+        adjacentFilePreviewJob = viewModelScope.launch {
+            previewUris.forEach { uri ->
+                val state = _uiState.value
+                if (state.folderThumbnails.containsKey(uri) || state.failedFolderThumbnails.contains(uri)) {
+                    return@forEach
+                }
+                try {
+                    val bitmap = repository.makeThumbnail(uri)
+                    _uiState.update { current ->
+                        if (uri in current.fileSequence) {
+                            current.copy(
+                                folderThumbnails = trimFolderThumbnailCache(
+                                    current.folderThumbnails + (uri to bitmap)
+                                )
+                            )
+                        } else {
+                            current
+                        }
+                    }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    _uiState.update { current ->
+                        if (uri in current.fileSequence) {
+                            current.copy(failedFolderThumbnails = current.failedFolderThumbnails + uri)
+                        } else {
+                            current
+                        }
+                    }
+                }
             }
         }
     }
