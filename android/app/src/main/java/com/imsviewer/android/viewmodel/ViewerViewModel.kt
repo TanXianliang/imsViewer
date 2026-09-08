@@ -212,6 +212,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
                 isUiVisible = true,
                 isInfoSheetVisible = false,
                 isSwitchingFile = false,
+                isSwitchingSubImage = false,
                 errorMessage = null
             )
         }
@@ -236,6 +237,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
                 isUiVisible = true,
                 isInfoSheetVisible = false,
                 isSwitchingFile = false,
+                isSwitchingSubImage = false,
                 errorMessage = null
             )
         }
@@ -258,6 +260,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
                 isUiVisible = true,
                 isInfoSheetVisible = false,
                 isSwitchingFile = false,
+                isSwitchingSubImage = false,
                 errorMessage = null
             )
         }
@@ -692,26 +695,40 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun openSubImage(index: Int) {
-        val current = _uiState.value.currentImage ?: return
+        val state = _uiState.value
+        val current = state.currentImage ?: return
+        if (state.isSwitchingSubImage) return
         if (current.imsFile == null || index !in current.imsFile.entries.indices || index == current.subImageIndex) {
             return
         }
 
         loadJob?.cancel()
+        _uiState.update {
+            it.copy(isSwitchingSubImage = true, loadingMessage = "Switching image", errorMessage = null)
+        }
         loadJob = viewModelScope.launch {
-            _uiState.update { it.copy(loadingMessage = "Switching image") }
-            runCatching { repository.openSubImage(current, index) }
-                .onSuccess { image ->
-                    _uiState.update {
-                        it.copy(screenState = ScreenState.Ready, currentImage = image, errorMessage = null)
-                    }
-                    loadThumbnails(image)
+            try {
+                val image = repository.openSubImage(current, index)
+                _uiState.update {
+                    it.copy(
+                        screenState = ScreenState.Ready,
+                        currentImage = image,
+                        isSwitchingSubImage = false,
+                        errorMessage = null
+                    )
                 }
-                .onFailure { error ->
-                    _uiState.update {
-                        it.copy(errorMessage = error.message ?: "Failed to switch sub image")
-                    }
+                loadThumbnails(image)
+            } catch (error: CancellationException) {
+                _uiState.update { it.copy(isSwitchingSubImage = false) }
+                throw error
+            } catch (error: Exception) {
+                _uiState.update {
+                    it.copy(
+                        isSwitchingSubImage = false,
+                        errorMessage = error.message ?: "Failed to switch sub image"
+                    )
                 }
+            }
         }
     }
 
@@ -983,9 +1000,16 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
         val entries = image.imsFile?.entries.orEmpty()
         if (entries.size <= 1) return
 
+        val adjacentEntries = listOf(
+            entries[(image.subImageIndex + 1) % entries.size],
+            entries[(image.subImageIndex - 1 + entries.size) % entries.size],
+            entries[image.subImageIndex]
+        )
+        val prioritizedEntries = (adjacentEntries + entries).distinctBy { it.index }
+
         thumbnailJob?.cancel()
         thumbnailJob = viewModelScope.launch {
-            entries.forEach { entry ->
+            prioritizedEntries.forEach { entry ->
                 if (_uiState.value.thumbnails.containsKey(entry.index)) return@forEach
                 runCatching { repository.makeThumbnail(image, entry) }
                     .onSuccess { bitmap ->

@@ -42,6 +42,7 @@ data class ViewerUiState(
     val isUiVisible: Boolean = true,
     val isInfoSheetVisible: Boolean = false,
     val isSwitchingFile: Boolean = false,
+    val isSwitchingSubImage: Boolean = false,
     val errorMessage: String? = null,
     val loadingMessage: String = "Loading"
 )

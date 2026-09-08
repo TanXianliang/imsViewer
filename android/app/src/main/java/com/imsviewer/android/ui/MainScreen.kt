@@ -6,10 +6,13 @@ import android.net.Uri
 import java.text.DateFormat
 import java.util.Date
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -76,13 +79,14 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerEvent
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -183,6 +187,7 @@ fun MainScreen(
                         image = image,
                         isUiVisible = state.isUiVisible,
                         isSwitchingFile = state.isSwitchingFile,
+                        isSwitchingSubImage = state.isSwitchingSubImage,
                         fileIndex = if (hasRemoteSequence) state.remoteFileIndex.coerceAtLeast(0) else state.fileIndex,
                         fileCount = if (hasRemoteSequence) {
                             state.remoteFileSequence.size
@@ -1010,6 +1015,7 @@ private fun ViewerScreen(
     image: ViewerImage,
     isUiVisible: Boolean,
     isSwitchingFile: Boolean,
+    isSwitchingSubImage: Boolean,
     fileIndex: Int,
     fileCount: Int,
     thumbnails: Map<Int, Bitmap>,
@@ -1042,6 +1048,8 @@ private fun ViewerScreen(
                 }
                 ImageCanvas(
                     image = image,
+                    thumbnails = thumbnails,
+                    isSwitchingSubImage = isSwitchingSubImage,
                     modifier = Modifier.weight(1f).fillMaxHeight(),
                     onTap = onToggleChrome,
                     onPreviousSubImage = onPreviousSubImage,
@@ -1053,6 +1061,8 @@ private fun ViewerScreen(
         } else {
             ImageCanvas(
                 image = image,
+                thumbnails = thumbnails,
+                isSwitchingSubImage = isSwitchingSubImage,
                 modifier = Modifier.fillMaxSize(),
                 onTap = onToggleChrome,
                 onPreviousSubImage = onPreviousSubImage,
@@ -1112,6 +1122,8 @@ private fun ViewerScreen(
 @Composable
 private fun ImageCanvas(
     image: ViewerImage,
+    thumbnails: Map<Int, Bitmap>,
+    isSwitchingSubImage: Boolean,
     modifier: Modifier,
     onTap: () -> Unit,
     onPreviousSubImage: () -> Unit,
@@ -1121,11 +1133,16 @@ private fun ImageCanvas(
 ) {
     var scale by remember(image.uri, image.subImageIndex) { mutableFloatStateOf(1f) }
     var offset by remember(image.uri, image.subImageIndex) { mutableStateOf(Offset.Zero) }
+    var verticalSwipeOffset by remember(image.uri, image.subImageIndex) { mutableFloatStateOf(0f) }
+    var awaitingSubImageChange by remember(image.uri, image.subImageIndex) { mutableStateOf(false) }
 
     BoxWithConstraints(modifier.background(Color.Black)) {
         val density = LocalDensity.current
         val viewportWidth = with(density) { maxWidth.toPx() }
         val viewportHeight = with(density) { maxHeight.toPx() }
+        val maximumHorizontalThreshold = with(density) { 96.dp.toPx() }
+        val maximumVerticalThreshold = with(density) { 52.dp.toPx() }
+        val flingVelocityThreshold = with(density) { 900.dp.toPx() }
         val fittedImageSize = remember(image.width, image.height, viewportWidth, viewportHeight) {
             fittedSize(
                 imageWidth = image.width.toFloat(),
@@ -1138,11 +1155,28 @@ private fun ImageCanvas(
         LaunchedEffect(image.uri, image.subImageIndex, viewportWidth, viewportHeight) {
             scale = 1f
             offset = Offset.Zero
+            verticalSwipeOffset = 0f
+            awaitingSubImageChange = false
+        }
+
+        LaunchedEffect(isSwitchingSubImage) {
+            if (!isSwitchingSubImage && awaitingSubImageChange) {
+                animate(
+                    initialValue = verticalSwipeOffset,
+                    targetValue = 0f,
+                    animationSpec = spring(
+                        dampingRatio = Spring.DampingRatioNoBouncy,
+                        stiffness = Spring.StiffnessMedium
+                    )
+                ) { value, _ -> verticalSwipeOffset = value }
+                awaitingSubImageChange = false
+            }
         }
 
         Box(
             modifier = Modifier
                 .fillMaxSize()
+                .clipToBounds()
                 .pointerInput(image.uri, image.subImageIndex, viewportWidth, viewportHeight) {
                     detectTapGestures(
                         onTap = { onTap() },
@@ -1161,77 +1195,194 @@ private fun ImageCanvas(
                         }
                     )
                 }
-                .pointerInput(image.uri, image.subImageIndex, viewportWidth, viewportHeight) {
-                    awaitEachGesture {
-                        awaitFirstDown(requireUnconsumed = false)
-                        var singleFingerDrag = Offset.Zero
-                        var hadMultiTouch = false
+                .pointerInput(
+                    image.uri,
+                    image.subImageIndex,
+                    viewportWidth,
+                    viewportHeight,
+                    isSwitchingSubImage
+                ) {
+                    if (isSwitchingSubImage) return@pointerInput
+                    while (true) {
+                        val gesture = awaitPointerEventScope {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            var singleFingerDrag = Offset.Zero
+                            var hadMultiTouch = false
+                            var swipeAxis = SwipeAxis.Undecided
+                            val velocityTracker = VelocityTracker().apply {
+                                addPosition(down.uptimeMillis, down.position)
+                            }
 
-                        while (true) {
-                            val event = awaitPointerEvent()
-                            val pressedChanges = event.changes.filter { it.pressed }
-                            if (pressedChanges.isEmpty()) break
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                event.changes.firstOrNull { it.id == down.id }?.let { change ->
+                                    velocityTracker.addPosition(change.uptimeMillis, change.position)
+                                }
+                                val pressedChanges = event.changes.filter { it.pressed }
+                                if (pressedChanges.isEmpty()) break
 
-                            if (pressedChanges.size >= 2) {
-                                hadMultiTouch = true
-                                singleFingerDrag = Offset.Zero
-                                val zoom = event.calculateZoomFactor()
-                                val pan = event.calculateAveragePan()
-                                val centroid = event.calculateCurrentCentroid()
-                                val nextScale = (scale * zoom).coerceIn(1f, 12f)
-                                val nextOffset = zoomAroundPoint(
-                                    currentOffset = offset,
-                                    oldScale = scale,
-                                    newScale = nextScale,
-                                    focalPoint = centroid,
-                                    viewportWidth = viewportWidth,
-                                    viewportHeight = viewportHeight
-                                ) + pan
-                                scale = nextScale
-                                offset = clampOffset(
-                                    nextOffset,
-                                    fittedImageSize,
-                                    nextScale,
-                                    viewportWidth,
-                                    viewportHeight
-                                )
-                                event.changes.forEach { it.consume() }
-                            } else {
-                                val change = pressedChanges.first()
-                                val delta = change.positionChange()
-                                if (delta != Offset.Zero) {
-                                    if (scale > 1.02f) {
-                                        offset = clampOffset(
-                                            offset + delta,
-                                            fittedImageSize,
-                                            scale,
-                                            viewportWidth,
-                                            viewportHeight
-                                        )
-                                    } else {
-                                        singleFingerDrag += delta
+                                if (pressedChanges.size >= 2) {
+                                    hadMultiTouch = true
+                                    singleFingerDrag = Offset.Zero
+                                    swipeAxis = SwipeAxis.Undecided
+                                    verticalSwipeOffset = 0f
+                                    val zoom = event.calculateZoomFactor()
+                                    val pan = event.calculateAveragePan()
+                                    val centroid = event.calculateCurrentCentroid()
+                                    val nextScale = (scale * zoom).coerceIn(1f, 12f)
+                                    val nextOffset = zoomAroundPoint(
+                                        currentOffset = offset,
+                                        oldScale = scale,
+                                        newScale = nextScale,
+                                        focalPoint = centroid,
+                                        viewportWidth = viewportWidth,
+                                        viewportHeight = viewportHeight
+                                    ) + pan
+                                    scale = nextScale
+                                    offset = clampOffset(
+                                        nextOffset,
+                                        fittedImageSize,
+                                        nextScale,
+                                        viewportWidth,
+                                        viewportHeight
+                                    )
+                                    event.changes.forEach { it.consume() }
+                                } else {
+                                    val change = pressedChanges.first()
+                                    val delta = change.position - change.previousPosition
+                                    if (delta != Offset.Zero) {
+                                        if (scale > 1.02f) {
+                                            offset = clampOffset(
+                                                offset + delta,
+                                                fittedImageSize,
+                                                scale,
+                                                viewportWidth,
+                                                viewportHeight
+                                            )
+                                        } else {
+                                            singleFingerDrag += delta
+                                            if (swipeAxis == SwipeAxis.Undecided) {
+                                                swipeAxis = resolveSwipeAxis(
+                                                    dragX = singleFingerDrag.x,
+                                                    dragY = singleFingerDrag.y,
+                                                    touchSlop = viewConfiguration.touchSlop,
+                                                    hasSubImages = image.subImageCount > 1
+                                                )
+                                            }
+                                            if (swipeAxis == SwipeAxis.Vertical) {
+                                                verticalSwipeOffset = singleFingerDrag.y.coerceIn(
+                                                    -viewportHeight,
+                                                    viewportHeight
+                                                )
+                                            }
+                                        }
+                                        change.consume()
                                     }
-                                    change.consume()
                                 }
                             }
+
+                            val velocity = velocityTracker.calculateVelocity()
+                            CompletedFitGesture(
+                                drag = singleFingerDrag,
+                                velocity = Offset(velocity.x, velocity.y),
+                                axis = swipeAxis,
+                                hadMultiTouch = hadMultiTouch
+                            )
                         }
 
-                        if (!hadMultiTouch && scale <= 1.02f) {
-                            handleFitModeSwipe(
-                                drag = singleFingerDrag,
-                                viewportWidth = viewportWidth,
-                                viewportHeight = viewportHeight,
+                        if (!gesture.hadMultiTouch && scale <= 1.02f) {
+                            val minimumFlingDistance = viewConfiguration.touchSlop * 1.5f
+                            val action = resolveFitModeSwipe(
+                                axis = gesture.axis,
+                                dragX = gesture.drag.x,
+                                dragY = gesture.drag.y,
+                                velocityX = gesture.velocity.x,
+                                velocityY = gesture.velocity.y,
+                                horizontalDistanceThreshold = max(
+                                    viewConfiguration.touchSlop * 2f,
+                                    min(viewportWidth * 0.16f, maximumHorizontalThreshold)
+                                ),
+                                verticalDistanceThreshold = max(
+                                    viewConfiguration.touchSlop * 2f,
+                                    min(viewportHeight * 0.08f, maximumVerticalThreshold)
+                                ),
+                                minimumFlingDistance = minimumFlingDistance,
+                                flingVelocityThreshold = flingVelocityThreshold,
                                 hasSubImages = image.subImageCount > 1,
-                                onPreviousSubImage = onPreviousSubImage,
-                                onNextSubImage = onNextSubImage,
-                                onPreviousFile = onPreviousFile,
-                                onNextFile = onNextFile
                             )
+                            when (action) {
+                                FitModeSwipeAction.PreviousSubImage,
+                                FitModeSwipeAction.NextSubImage -> {
+                                    awaitingSubImageChange = true
+                                    animate(
+                                        initialValue = verticalSwipeOffset,
+                                        targetValue = if (action == FitModeSwipeAction.NextSubImage) {
+                                            -viewportHeight
+                                        } else {
+                                            viewportHeight
+                                        },
+                                        animationSpec = tween(durationMillis = 180)
+                                    ) { value, _ -> verticalSwipeOffset = value }
+                                    if (action == FitModeSwipeAction.NextSubImage) {
+                                        onNextSubImage()
+                                    } else {
+                                        onPreviousSubImage()
+                                    }
+                                }
+                                FitModeSwipeAction.PreviousFile -> onPreviousFile()
+                                FitModeSwipeAction.NextFile -> onNextFile()
+                                FitModeSwipeAction.None -> animate(
+                                    initialValue = verticalSwipeOffset,
+                                    targetValue = 0f,
+                                    animationSpec = spring(
+                                        dampingRatio = Spring.DampingRatioNoBouncy,
+                                        stiffness = Spring.StiffnessMedium
+                                    )
+                                ) { value, _ -> verticalSwipeOffset = value }
+                            }
+                        } else {
+                            verticalSwipeOffset = 0f
                         }
                     }
                 },
             contentAlignment = Alignment.Center
         ) {
+            val swipeOffsetY = verticalSwipeOffset
+            val targetSubImageIndex = when {
+                swipeOffsetY < -0.5f -> (image.subImageIndex + 1) % image.subImageCount
+                swipeOffsetY > 0.5f -> (image.subImageIndex - 1 + image.subImageCount) % image.subImageCount
+                else -> null
+            }
+            targetSubImageIndex?.let { targetIndex ->
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer {
+                            translationY = swipeOffsetY + if (swipeOffsetY < 0f) {
+                                viewportHeight
+                            } else {
+                                -viewportHeight
+                            }
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    val preview = thumbnails[targetIndex]
+                    if (preview != null) {
+                        Image(
+                            bitmap = preview.asImageBitmap(),
+                            contentDescription = null,
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Fit
+                        )
+                    } else {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(24.dp),
+                            color = Color.White,
+                            strokeWidth = 2.dp
+                        )
+                    }
+                }
+            }
             Image(
                 bitmap = image.bitmap.asImageBitmap(),
                 contentDescription = image.fileName,
@@ -1241,7 +1392,7 @@ private fun ImageCanvas(
                         scaleX = scale
                         scaleY = scale
                         translationX = offset.x
-                        translationY = offset.y
+                        translationY = offset.y + swipeOffsetY
                     },
                 contentScale = ContentScale.Fit
             )
@@ -1249,30 +1400,12 @@ private fun ImageCanvas(
     }
 }
 
-private fun handleFitModeSwipe(
-    drag: Offset,
-    viewportWidth: Float,
-    viewportHeight: Float,
-    hasSubImages: Boolean,
-    onPreviousSubImage: () -> Unit,
-    onNextSubImage: () -> Unit,
-    onPreviousFile: () -> Unit,
-    onNextFile: () -> Unit
-) {
-    val absX = abs(drag.x)
-    val absY = abs(drag.y)
-    val horizontalThreshold = viewportWidth * 0.16f
-    val verticalThreshold = viewportHeight * 0.10f
-
-    if (absX > horizontalThreshold && absX > absY * 1.35f) {
-        if (drag.x < 0f) onNextFile() else onPreviousFile()
-        return
-    }
-
-    if (hasSubImages && absY > verticalThreshold && absY > absX * 1.25f) {
-        if (drag.y < 0f) onNextSubImage() else onPreviousSubImage()
-    }
-}
+private data class CompletedFitGesture(
+    val drag: Offset,
+    val velocity: Offset,
+    val axis: SwipeAxis,
+    val hadMultiTouch: Boolean
+)
 
 private fun PointerEvent.calculateCurrentCentroid(): Offset {
     val pressed = changes.filter { it.pressed }
