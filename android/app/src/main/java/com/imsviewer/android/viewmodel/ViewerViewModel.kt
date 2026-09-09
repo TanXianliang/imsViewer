@@ -9,6 +9,8 @@ import androidx.lifecycle.viewModelScope
 import com.imsviewer.android.data.ImageRepository
 import com.imsviewer.android.data.SecurePasswordStore
 import com.imsviewer.android.data.SftpRepository
+import com.imsviewer.android.domain.RemoteThumbnailCandidate
+import com.imsviewer.android.domain.RemoteThumbnailQueue
 import com.imsviewer.android.domain.wrappedAdjacentIndex
 import com.imsviewer.android.domain.model.BrowserDisplayMode
 import com.imsviewer.android.domain.model.OpenRecord
@@ -19,12 +21,12 @@ import com.imsviewer.android.domain.model.ScreenState
 import com.imsviewer.android.domain.model.ViewerUiState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import java.util.PriorityQueue
 import java.util.UUID
 
 class ViewerViewModel(application: Application) : AndroidViewModel(application) {
@@ -41,6 +43,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
     private var folderThumbnailJob: Job? = null
     private var adjacentFilePreviewJob: Job? = null
     private var remoteThumbnailJob: Job? = null
+    private var remoteThumbnailQueue = RemoteThumbnailQueue()
     private var remoteVisibleRange: IntRange? = null
     private val sessionPasswords = mutableMapOf<String, String>()
 
@@ -196,8 +199,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
         loadJob?.cancel()
         folderThumbnailJob?.cancel()
         adjacentFilePreviewJob?.cancel()
-        remoteThumbnailJob?.cancel()
-        remoteVisibleRange = null
+        cancelRemoteThumbnailLoading()
         _uiState.update {
             it.copy(
                 screenState = ScreenState.Empty,
@@ -242,6 +244,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
     fun updateRemoteDisplayMode(mode: BrowserDisplayMode) {
         settingsStore.edit().putString(RemoteDisplayModeKey, mode.preferenceValue).apply()
         remoteVisibleRange = null
+        remoteThumbnailQueue.replace(emptyList())
         _uiState.update { it.copy(remoteDisplayMode = mode) }
     }
 
@@ -272,8 +275,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
             showHome()
             return
         }
-        remoteThumbnailJob?.cancel()
-        remoteVisibleRange = null
+        cancelRemoteThumbnailLoading()
         _uiState.update {
             it.copy(
                 screenState = ScreenState.Remote,
@@ -449,8 +451,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
         popBackStack: Boolean = false
     ) {
         loadJob?.cancel()
-        remoteThumbnailJob?.cancel()
-        remoteVisibleRange = null
+        cancelRemoteThumbnailLoading()
         val previousState = _uiState.value
         loadJob = viewModelScope.launch {
             _uiState.update {
@@ -512,7 +513,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
         showFullScreenLoading: Boolean
     ) {
         loadJob?.cancel()
-        remoteThumbnailJob?.cancel()
+        cancelRemoteThumbnailLoading()
         loadJob = viewModelScope.launch {
             _uiState.update {
                 if (showFullScreenLoading) {
@@ -1120,14 +1121,10 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
         entries: List<RemoteEntry>,
         visibleRange: IntRange
     ) {
-        remoteThumbnailJob?.cancel()
         val state = _uiState.value
         val firstPrefetchIndex = (visibleRange.first - RemoteThumbnailPrefetchCount).coerceAtLeast(0)
         val lastPrefetchIndex = (visibleRange.last + RemoteThumbnailPrefetchCount).coerceAtMost(entries.lastIndex)
-        val queue = PriorityQueue(
-            compareBy<RemoteThumbnailCandidate> { it.priority }
-                .thenBy { it.index }
-        )
+        val candidates = mutableListOf<RemoteThumbnailCandidate>()
         for (index in firstPrefetchIndex..lastPrefetchIndex) {
             val entry = entries[index]
             if (!sftpRepository.canMakeThumbnail(entry)) continue
@@ -1139,38 +1136,86 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
                 index > visibleRange.last -> index - visibleRange.last
                 else -> 0
             }
-            queue.add(RemoteThumbnailCandidate(index = index, priority = priority, entry = entry))
+            candidates += RemoteThumbnailCandidate(index = index, priority = priority, entry = entry)
         }
-        val candidates = buildList {
-            while (queue.isNotEmpty()) add(queue.remove().entry)
-        }
-        if (candidates.isEmpty()) return
+
+        val queue = remoteThumbnailQueue
+        queue.replace(candidates)
+        startRemoteThumbnailWorker(connection, queue)
+    }
+
+    private fun startRemoteThumbnailWorker(
+        connection: RemoteConnection,
+        queue: RemoteThumbnailQueue
+    ) {
+        if (remoteThumbnailJob?.isActive == true || !queue.hasPending()) return
         remoteThumbnailJob = viewModelScope.launch {
+            val workerJob = currentCoroutineContext()[Job]
             try {
-                sftpRepository.makeThumbnails(connection, candidates, RemoteThumbnailSizePx) { entry, result ->
-                    result.onSuccess { bitmap ->
-                        _uiState.update { current ->
-                            if (current.remoteConnection == connection) {
-                                current.copy(remoteThumbnails = trimRemoteThumbnailCache(current.remoteThumbnails + (entry.path to bitmap)))
-                            } else {
-                                current
+                sftpRepository.makeThumbnails(
+                    connection = connection,
+                    targetMaxSize = RemoteThumbnailSizePx,
+                    nextEntry = queue::poll
+                ) { entry, result ->
+                    try {
+                        result.onSuccess { bitmap ->
+                            _uiState.update { current ->
+                                if (
+                                    current.remoteConnection == connection &&
+                                    current.remoteEntries.any { it.path == entry.path }
+                                ) {
+                                    current.copy(
+                                        remoteThumbnails = trimRemoteThumbnailCache(
+                                            current.remoteThumbnails + (entry.path to bitmap)
+                                        )
+                                    )
+                                } else {
+                                    current
+                                }
                             }
                         }
-                    }
-                    result.onFailure {
-                        _uiState.update { current ->
-                            if (current.remoteConnection == connection) {
-                                current.copy(failedRemoteThumbnails = current.failedRemoteThumbnails + entry.path)
-                            } else {
-                                current
+                        result.onFailure {
+                            _uiState.update { current ->
+                                if (
+                                    current.remoteConnection == connection &&
+                                    current.remoteEntries.any { it.path == entry.path }
+                                ) {
+                                    current.copy(
+                                        failedRemoteThumbnails = current.failedRemoteThumbnails + entry.path
+                                    )
+                                } else {
+                                    current
+                                }
                             }
                         }
+                    } finally {
+                        queue.complete(entry.path)
                     }
                 }
             } catch (error: CancellationException) {
                 throw error
+            } finally {
+                if (remoteThumbnailJob === workerJob) {
+                    remoteThumbnailJob = null
+                    val current = _uiState.value
+                    if (
+                        queue === remoteThumbnailQueue &&
+                        queue.hasPending() &&
+                        current.screenState == ScreenState.Remote &&
+                        current.remoteConnection == connection
+                    ) {
+                        startRemoteThumbnailWorker(connection, queue)
+                    }
+                }
             }
         }
+    }
+
+    private fun cancelRemoteThumbnailLoading() {
+        remoteThumbnailJob?.cancel()
+        remoteThumbnailJob = null
+        remoteThumbnailQueue = RemoteThumbnailQueue()
+        remoteVisibleRange = null
     }
 
     private fun trimFolderThumbnailCache(cache: Map<Uri, android.graphics.Bitmap>): Map<Uri, android.graphics.Bitmap> {
@@ -1182,12 +1227,6 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
         if (cache.size <= MaxRemoteThumbnails) return cache
         return cache.entries.toList().takeLast(MaxRemoteThumbnails).associate { it.toPair() }
     }
-
-    private data class RemoteThumbnailCandidate(
-        val index: Int,
-        val priority: Int,
-        val entry: RemoteEntry
-    )
 
     private companion object {
         const val MaxRecords = 30

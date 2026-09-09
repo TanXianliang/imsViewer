@@ -101,8 +101,8 @@ class SftpRepository(private val context: Context) {
 
     suspend fun makeThumbnails(
         connection: RemoteConnection,
-        entries: List<RemoteEntry>,
         targetMaxSize: Int,
+        nextEntry: () -> RemoteEntry?,
         onResult: (RemoteEntry, Result<Bitmap>) -> Unit
     ) =
         withContext(Dispatchers.IO) {
@@ -112,38 +112,48 @@ class SftpRepository(private val context: Context) {
                 cacheDir.mkdirs()
                 trimDirectoryCache(cacheDir, ThumbnailCacheLimitBytes, keepFile = null)
 
-                val pendingEntries = mutableListOf<Pair<RemoteEntry, File>>()
-                entries.forEach { entry ->
+                var entry = nextEntry() ?: return@withLock
+                while (true) {
                     batchContext.ensureActive()
                     require(canMakeThumbnail(entry)) { "Remote thumbnail is not supported" }
                     val localFile = File(cacheDir, thumbnailFileName(connection, entry))
                     val cachedBitmap = loadCachedThumbnail(localFile, targetMaxSize)
                     if (cachedBitmap != null) {
+                        batchContext.ensureActive()
                         onResult(entry, Result.success(cachedBitmap))
+                        entry = nextEntry() ?: return@withLock
                     } else {
-                        pendingEntries += entry to localFile
+                        break
                     }
                 }
-                if (pendingEntries.isEmpty()) return@withLock
 
-                var processedCount = 0
+                var currentEntry: RemoteEntry? = entry
                 try {
                     withSftp(connection) { sftp ->
-                        pendingEntries.forEach { (entry, localFile) ->
+                        while (currentEntry != null) {
                             batchContext.ensureActive()
-                            val result = runCatching {
-                                fetchAndCacheThumbnail(sftp, entry, localFile, targetMaxSize)
+                            val target = requireNotNull(currentEntry)
+                            val localFile = File(cacheDir, thumbnailFileName(connection, target))
+                            val cachedBitmap = loadCachedThumbnail(localFile, targetMaxSize)
+                            val result = if (cachedBitmap != null) {
+                                Result.success(cachedBitmap)
+                            } else {
+                                runCatching {
+                                    fetchAndCacheThumbnail(sftp, target, localFile, targetMaxSize)
+                                }
                             }
                             batchContext.ensureActive()
-                            onResult(entry, result)
-                            processedCount += 1
+                            onResult(target, result)
+                            currentEntry = nextEntry()
                         }
                     }
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Throwable) {
-                    pendingEntries.drop(processedCount).forEach { (entry, _) ->
-                        onResult(entry, Result.failure(error))
+                    currentEntry?.let { onResult(it, Result.failure(error)) }
+                    while (true) {
+                        val pendingEntry = nextEntry() ?: break
+                        onResult(pendingEntry, Result.failure(error))
                     }
                 }
             }
