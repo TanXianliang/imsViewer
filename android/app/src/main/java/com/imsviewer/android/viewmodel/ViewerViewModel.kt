@@ -57,11 +57,11 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
                 networkCacheLimitMb = loadNetworkCacheLimitMb(),
                 folderDisplayMode = loadBrowserDisplayMode(
                     FolderDisplayModeKey,
-                    BrowserDisplayMode.MediumIcons
+                    BrowserDisplayMode.SmallIcons
                 ),
                 remoteDisplayMode = loadBrowserDisplayMode(
                     RemoteDisplayModeKey,
-                    BrowserDisplayMode.List
+                    BrowserDisplayMode.SmallIcons
                 )
             )
         }

@@ -15,8 +15,8 @@ class BrowserDisplayModeTest {
     @Test
     fun unknownValueFallsBackToScreenDefault() {
         assertEquals(
-            BrowserDisplayMode.MediumIcons,
-            BrowserDisplayMode.fromPreference("unknown", BrowserDisplayMode.MediumIcons)
+            BrowserDisplayMode.SmallIcons,
+            BrowserDisplayMode.fromPreference("unknown", BrowserDisplayMode.SmallIcons)
         )
     }
 }
