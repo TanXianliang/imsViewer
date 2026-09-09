@@ -20,6 +20,16 @@ import com.imsviewer.android.viewmodel.ViewerViewModel
 class MainActivity : ComponentActivity() {
     private val viewModel: ViewerViewModel by viewModels()
 
+    override fun onStart() {
+        super.onStart()
+        viewModel.onAppForegrounded()
+    }
+
+    override fun onStop() {
+        viewModel.onAppBackgrounded()
+        super.onStop()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.statusBarColor = Color.rgb(17, 17, 20)

@@ -304,6 +304,28 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
         loadRemoteThumbnails(connection, state.remoteEntries, normalizedRange)
     }
 
+    fun onAppBackgrounded() {
+        remoteThumbnailJob?.cancel()
+        remoteThumbnailJob = null
+        remoteThumbnailQueue = RemoteThumbnailQueue()
+    }
+
+    fun onAppForegrounded() {
+        val state = _uiState.value
+        val connection = state.remoteConnection ?: return
+        val visibleRange = remoteVisibleRange ?: return
+        if (state.screenState != ScreenState.Remote || state.remoteEntries.isEmpty()) return
+
+        _uiState.update { current ->
+            if (current.remoteConnection == connection) {
+                current.copy(failedRemoteThumbnails = emptySet())
+            } else {
+                current
+            }
+        }
+        loadRemoteThumbnails(connection, _uiState.value.remoteEntries, visibleRange)
+    }
+
     fun addNetworkRecord(
         alias: String,
         host: String,
