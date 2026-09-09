@@ -36,16 +36,19 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed as lazyItemsIndexed
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.activity.compose.BackHandler
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ViewList
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.FolderOpen
+import androidx.compose.material.icons.outlined.GridView
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.MoreVert
@@ -58,6 +61,8 @@ import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -98,6 +103,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.imsviewer.android.domain.model.BrowserDisplayMode
 import com.imsviewer.android.domain.model.OpenRecord
 import com.imsviewer.android.domain.model.OpenRecordKind
 import com.imsviewer.android.domain.model.RemoteEntry
@@ -148,10 +154,12 @@ fun MainScreen(
                     thumbnails = state.remoteThumbnails,
                     failedThumbnails = state.failedRemoteThumbnails,
                     isBusy = state.isRemoteBusy,
+                    displayMode = state.remoteDisplayMode,
                     onBack = viewModel::navigateRemoteBack,
                     onHome = viewModel::showHome,
                     onOpenEntry = viewModel::openRemoteEntry,
-                    onVisibleRangeChanged = viewModel::updateRemoteVisibleRange
+                    onVisibleRangeChanged = viewModel::updateRemoteVisibleRange,
+                    onDisplayModeChanged = viewModel::updateRemoteDisplayMode
                 )
             }
             ScreenState.Folder -> {
@@ -162,8 +170,10 @@ fun MainScreen(
                     thumbnails = state.folderThumbnails,
                     failedThumbnails = state.failedFolderThumbnails,
                     selectedIndex = state.fileIndex,
+                    displayMode = state.folderDisplayMode,
                     onHome = viewModel::showHome,
-                    onOpenImage = viewModel::openFolderImage
+                    onOpenImage = viewModel::openFolderImage,
+                    onDisplayModeChanged = viewModel::updateFolderDisplayMode
                 )
             }
             ScreenState.Loading -> LoadingState(state.loadingMessage)
@@ -282,19 +292,42 @@ private fun RemoteBrowserScreen(
     thumbnails: Map<String, Bitmap>,
     failedThumbnails: Set<String>,
     isBusy: Boolean,
+    displayMode: BrowserDisplayMode,
     onBack: () -> Unit,
     onHome: () -> Unit,
     onOpenEntry: (RemoteEntry) -> Unit,
-    onVisibleRangeChanged: (IntRange) -> Unit
+    onVisibleRangeChanged: (IntRange) -> Unit,
+    onDisplayModeChanged: (BrowserDisplayMode) -> Unit
 ) {
     val listState = rememberLazyListState()
+    val gridState = rememberLazyGridState()
 
-    LaunchedEffect(path) {
-        listState.scrollToItem(0)
+    LaunchedEffect(path, displayMode) {
+        if (displayMode == BrowserDisplayMode.List) {
+            listState.scrollToItem(0)
+        } else {
+            gridState.scrollToItem(0)
+        }
     }
-    LaunchedEffect(path, entries, listState) {
+    LaunchedEffect(path, entries, displayMode, listState) {
+        if (displayMode != BrowserDisplayMode.List) return@LaunchedEffect
         snapshotFlow {
             val visibleItems = listState.layoutInfo.visibleItemsInfo
+            if (visibleItems.isEmpty()) {
+                null
+            } else {
+                visibleItems.first().index..visibleItems.last().index
+            }
+        }
+            .distinctUntilChanged()
+            .collect { visibleRange ->
+                if (visibleRange != null) onVisibleRangeChanged(visibleRange)
+            }
+    }
+    LaunchedEffect(path, entries, displayMode, gridState) {
+        if (displayMode == BrowserDisplayMode.List) return@LaunchedEffect
+        snapshotFlow {
+            val visibleItems = gridState.layoutInfo.visibleItemsInfo
             if (visibleItems.isEmpty()) {
                 null
             } else {
@@ -324,6 +357,10 @@ private fun RemoteBrowserScreen(
                 Text(title, color = Color.White, fontSize = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(path, color = Color(0xFF9A9AA0), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
+            BrowserDisplayModeButton(
+                displayMode = displayMode,
+                onDisplayModeChanged = onDisplayModeChanged
+            )
             IconButton(onClick = onHome) {
                 Icon(Icons.Outlined.Home, contentDescription = "Home", tint = Color.White)
             }
@@ -351,19 +388,42 @@ private fun RemoteBrowserScreen(
                 Text("Directories and supported image files appear here.", color = Color(0xFF9A9AA0), fontSize = 13.sp)
             }
         } else {
-            LazyColumn(
-                state = listState,
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                items(entries, key = { it.path }) { entry ->
-                    RemoteEntryRow(
-                        entry = entry,
-                        thumbnail = thumbnails[entry.path],
-                        thumbnailFailed = entry.path in failedThumbnails,
-                        onClick = { onOpenEntry(entry) }
-                    )
+            if (displayMode == BrowserDisplayMode.List) {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(entries, key = { it.path }) { entry ->
+                        RemoteEntryRow(
+                            entry = entry,
+                            thumbnail = thumbnails[entry.path],
+                            thumbnailFailed = entry.path in failedThumbnails,
+                            onClick = { onOpenEntry(entry) }
+                        )
+                    }
+                }
+            } else {
+                val cellSize = displayMode.minimumCellSize()
+                val spacing = displayMode.gridSpacing()
+                LazyVerticalGrid(
+                    columns = GridCells.Adaptive(cellSize),
+                    state = gridState,
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(spacing),
+                    horizontalArrangement = Arrangement.spacedBy(spacing),
+                    verticalArrangement = Arrangement.spacedBy(spacing)
+                ) {
+                    itemsIndexed(entries, key = { _, entry -> entry.path }) { _, entry ->
+                        RemoteEntryGridItem(
+                            entry = entry,
+                            thumbnail = thumbnails[entry.path],
+                            thumbnailFailed = entry.path in failedThumbnails,
+                            compact = displayMode == BrowserDisplayMode.SmallIcons,
+                            onClick = { onOpenEntry(entry) }
+                        )
+                    }
                 }
             }
         }
@@ -399,19 +459,91 @@ private fun RemoteEntryRow(
 }
 
 @Composable
+private fun RemoteEntryGridItem(
+    entry: RemoteEntry,
+    thumbnail: Bitmap?,
+    thumbnailFailed: Boolean,
+    compact: Boolean,
+    onClick: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f)
+                .background(Color(0xFF1D1D22))
+                .border(1.dp, Color(0xFF333338)),
+            contentAlignment = Alignment.Center
+        ) {
+            when {
+                entry.isDirectory -> Icon(
+                    imageVector = Icons.Outlined.FolderOpen,
+                    contentDescription = null,
+                    tint = Color.White,
+                    modifier = Modifier.fillMaxSize(0.42f)
+                )
+                thumbnail != null -> Image(
+                    bitmap = thumbnail.asImageBitmap(),
+                    contentDescription = entry.name,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
+                )
+                thumbnailFailed -> Icon(
+                    imageVector = Icons.Outlined.PhotoLibrary,
+                    contentDescription = null,
+                    tint = Color(0xFFB8B8B8),
+                    modifier = Modifier.fillMaxSize(0.32f)
+                )
+                else -> CircularProgressIndicator(
+                    modifier = Modifier.size(if (compact) 18.dp else 24.dp),
+                    strokeWidth = 2.dp
+                )
+            }
+        }
+        Spacer(Modifier.height(if (compact) 3.dp else 5.dp))
+        Text(
+            text = entry.name,
+            color = Color(0xFFD8D8DC),
+            fontSize = if (compact) 10.sp else 12.sp,
+            maxLines = if (compact) 1 else 2,
+            overflow = TextOverflow.Ellipsis
+        )
+        if (!entry.isDirectory && !compact) {
+            Text(
+                text = SizeFormatter.format(entry.sizeBytes),
+                color = Color(0xFF8F8F96),
+                fontSize = 10.sp,
+                maxLines = 1
+            )
+        }
+    }
+}
+
+@Composable
 private fun FolderGridScreen(
     title: String,
     uris: List<Uri>,
     thumbnails: Map<Uri, Bitmap>,
     failedThumbnails: Set<Uri>,
     selectedIndex: Int,
+    displayMode: BrowserDisplayMode,
     onHome: () -> Unit,
-    onOpenImage: (Int) -> Unit
+    onOpenImage: (Int) -> Unit,
+    onDisplayModeChanged: (BrowserDisplayMode) -> Unit
 ) {
     val gridState = rememberLazyGridState()
-    LaunchedEffect(selectedIndex, uris.size) {
+    val listState = rememberLazyListState()
+    LaunchedEffect(selectedIndex, uris.size, displayMode) {
         if (selectedIndex in uris.indices) {
-            gridState.scrollToItem(selectedIndex)
+            if (displayMode == BrowserDisplayMode.List) {
+                listState.scrollToItem(selectedIndex)
+            } else {
+                gridState.scrollToItem(selectedIndex)
+            }
         }
     }
 
@@ -437,24 +569,51 @@ private fun FolderGridScreen(
                 modifier = Modifier.weight(1f)
             )
             Text("${uris.size}", color = Color(0xFFB8B8B8), fontSize = 13.sp)
+            BrowserDisplayModeButton(
+                displayMode = displayMode,
+                onDisplayModeChanged = onDisplayModeChanged
+            )
         }
-        LazyVerticalGrid(
-            columns = GridCells.Adaptive(112.dp),
-            modifier = Modifier.fillMaxSize(),
-            state = gridState,
-            contentPadding = PaddingValues(10.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            itemsIndexed(uris, key = { _, uri -> uri.toString() }) { index, uri ->
-                FolderGridItem(
-                    index = index,
-                    uri = uri,
-                    bitmap = thumbnails[uri],
-                    failed = uri in failedThumbnails,
-                    selected = index == selectedIndex,
-                    onClick = { onOpenImage(index) }
-                )
+        if (displayMode == BrowserDisplayMode.List) {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                lazyItemsIndexed(uris, key = { _, uri -> uri.toString() }) { index, uri ->
+                    FolderEntryRow(
+                        index = index,
+                        uri = uri,
+                        bitmap = thumbnails[uri],
+                        failed = uri in failedThumbnails,
+                        selected = index == selectedIndex,
+                        onClick = { onOpenImage(index) }
+                    )
+                }
+            }
+        } else {
+            val cellSize = displayMode.minimumCellSize()
+            val spacing = displayMode.gridSpacing()
+            LazyVerticalGrid(
+                columns = GridCells.Adaptive(cellSize),
+                modifier = Modifier.fillMaxSize(),
+                state = gridState,
+                contentPadding = PaddingValues(spacing),
+                horizontalArrangement = Arrangement.spacedBy(spacing),
+                verticalArrangement = Arrangement.spacedBy(spacing)
+            ) {
+                itemsIndexed(uris, key = { _, uri -> uri.toString() }) { index, uri ->
+                    FolderGridItem(
+                        index = index,
+                        uri = uri,
+                        bitmap = thumbnails[uri],
+                        failed = uri in failedThumbnails,
+                        selected = index == selectedIndex,
+                        compact = displayMode == BrowserDisplayMode.SmallIcons,
+                        onClick = { onOpenImage(index) }
+                    )
+                }
             }
         }
     }
@@ -467,6 +626,7 @@ private fun FolderGridItem(
     bitmap: Bitmap?,
     failed: Boolean,
     selected: Boolean,
+    compact: Boolean,
     onClick: () -> Unit
 ) {
     Column(
@@ -497,13 +657,148 @@ private fun FolderGridItem(
         }
         Spacer(Modifier.height(5.dp))
         Text(
-            text = uri.lastPathSegment?.substringAfterLast('/') ?: "Image ${index + 1}",
+            text = uri.browserDisplayName(index),
             color = Color(0xFFD8D8DC),
-            fontSize = 12.sp,
+            fontSize = if (compact) 10.sp else 12.sp,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
     }
+}
+
+@Composable
+private fun FolderEntryRow(
+    index: Int,
+    uri: Uri,
+    bitmap: Bitmap?,
+    failed: Boolean,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = Color(0xFF19191E),
+        shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onClick)
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(48.dp)
+                    .background(Color(0xFF232329))
+                    .border(
+                        if (selected) 2.dp else 1.dp,
+                        if (selected) Color(0xFF7CC7FF) else Color(0xFF333338)
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                when {
+                    bitmap != null -> Image(
+                        bitmap = bitmap.asImageBitmap(),
+                        contentDescription = "Image ${index + 1}",
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop
+                    )
+                    failed -> Icon(
+                        imageVector = Icons.Outlined.PhotoLibrary,
+                        contentDescription = null,
+                        tint = Color(0xFFB8B8B8),
+                        modifier = Modifier.size(22.dp)
+                    )
+                    else -> CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                }
+            }
+            Spacer(Modifier.width(12.dp))
+            Text(
+                text = uri.browserDisplayName(index),
+                color = Color.White,
+                fontSize = 15.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+        }
+    }
+}
+
+@Composable
+private fun BrowserDisplayModeButton(
+    displayMode: BrowserDisplayMode,
+    onDisplayModeChanged: (BrowserDisplayMode) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        IconButton(onClick = { expanded = true }) {
+            Icon(
+                imageVector = if (displayMode == BrowserDisplayMode.List) {
+                    Icons.AutoMirrored.Outlined.ViewList
+                } else {
+                    Icons.Outlined.GridView
+                },
+                contentDescription = "Display mode: ${displayMode.displayLabel()}",
+                tint = Color.White
+            )
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false }
+        ) {
+            BrowserDisplayMode.entries.forEach { mode ->
+                DropdownMenuItem(
+                    text = { Text(mode.displayLabel()) },
+                    leadingIcon = {
+                        Icon(
+                            imageVector = if (mode == BrowserDisplayMode.List) {
+                                Icons.AutoMirrored.Outlined.ViewList
+                            } else {
+                                Icons.Outlined.GridView
+                            },
+                            contentDescription = null
+                        )
+                    },
+                    trailingIcon = {
+                        if (mode == displayMode) {
+                            Text("Current", color = Color(0xFF7CC7FF), fontSize = 11.sp)
+                        }
+                    },
+                    onClick = {
+                        expanded = false
+                        if (mode != displayMode) onDisplayModeChanged(mode)
+                    }
+                )
+            }
+        }
+    }
+}
+
+private fun BrowserDisplayMode.displayLabel(): String = when (this) {
+    BrowserDisplayMode.LargeIcons -> "Large icons"
+    BrowserDisplayMode.MediumIcons -> "Medium icons"
+    BrowserDisplayMode.SmallIcons -> "Small icons"
+    BrowserDisplayMode.List -> "List"
+}
+
+private fun BrowserDisplayMode.minimumCellSize() = when (this) {
+    BrowserDisplayMode.LargeIcons -> 168.dp
+    BrowserDisplayMode.MediumIcons -> 112.dp
+    BrowserDisplayMode.SmallIcons -> 76.dp
+    BrowserDisplayMode.List -> 112.dp
+}
+
+private fun BrowserDisplayMode.gridSpacing() = when (this) {
+    BrowserDisplayMode.LargeIcons -> 12.dp
+    BrowserDisplayMode.MediumIcons -> 10.dp
+    BrowserDisplayMode.SmallIcons -> 6.dp
+    BrowserDisplayMode.List -> 8.dp
+}
+
+private fun Uri.browserDisplayName(index: Int): String {
+    return lastPathSegment?.substringAfterLast('/') ?: "Image ${index + 1}"
 }
 
 @Composable

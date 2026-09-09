@@ -22,6 +22,8 @@ data class ViewerUiState(
     val networkRecords: List<OpenRecord> = emptyList(),
     val homeTab: OpenRecordKind = OpenRecordKind.File,
     val networkCacheLimitMb: Int = 512,
+    val folderDisplayMode: BrowserDisplayMode = BrowserDisplayMode.MediumIcons,
+    val remoteDisplayMode: BrowserDisplayMode = BrowserDisplayMode.List,
     val folderTitle: String? = null,
     val folderSequence: List<Uri> = emptyList(),
     val folderThumbnails: Map<Uri, Bitmap> = emptyMap(),

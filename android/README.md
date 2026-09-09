@@ -34,6 +34,7 @@ android/app/build/outputs/apk/debug/app-debug.apk
 - IMS 多子图真实缩略图条。
 - IMS 适屏状态下支持主图区域上下滑循环切换子图。
 - SAF 同目录扫描，适屏状态下左右滑切换上一 / 下一文件。
+- 本地文件夹支持大图标、中图标、小图标和列表四种显示模式，并记住上次选择。
 - 文件和 IMS 子图信息 bottom sheet。
 - 系统 ShareSheet 分享当前原文件 URI。
 
@@ -46,6 +47,7 @@ android/app/build/outputs/apk/debug/app-debug.apk
 - 新 IMS 缩略图：先读取尾部 36B，再按 `IMSTHMB` Trailer 只读取内嵌 160px JPEG 和校验 CRC32。
 - 旧 IMS 缩略图：分段读取尾部索引定位封面，只下载封面数据，不下载整个 IMS。
 - 远程列表只加载可见项及前后各 8 项；可见项优先，快速滚动会取消旧队列。
+- 远程目录支持大图标、中图标、小图标和列表四种显示模式，并记住上次选择。
 - 缩略图使用单 worker，同一批次复用一个 SFTP Session/Channel，避免逐张重新登录。
 - 远程 IMS 文件点击下载到本地缓存后进入浏览；同目录切换复用缓存。
 - 缩略图任务随目录切换 / 返回首页自动取消，避免无谓流量。

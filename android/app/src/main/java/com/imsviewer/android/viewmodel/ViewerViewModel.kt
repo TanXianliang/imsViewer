@@ -10,6 +10,7 @@ import com.imsviewer.android.data.ImageRepository
 import com.imsviewer.android.data.SecurePasswordStore
 import com.imsviewer.android.data.SftpRepository
 import com.imsviewer.android.domain.wrappedAdjacentIndex
+import com.imsviewer.android.domain.model.BrowserDisplayMode
 import com.imsviewer.android.domain.model.OpenRecord
 import com.imsviewer.android.domain.model.OpenRecordKind
 import com.imsviewer.android.domain.model.RemoteConnection
@@ -53,7 +54,15 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
                 fileRecords = fileRecords,
                 folderRecords = folderRecords,
                 networkRecords = networkRecords,
-                networkCacheLimitMb = loadNetworkCacheLimitMb()
+                networkCacheLimitMb = loadNetworkCacheLimitMb(),
+                folderDisplayMode = loadBrowserDisplayMode(
+                    FolderDisplayModeKey,
+                    BrowserDisplayMode.MediumIcons
+                ),
+                remoteDisplayMode = loadBrowserDisplayMode(
+                    RemoteDisplayModeKey,
+                    BrowserDisplayMode.List
+                )
             )
         }
     }
@@ -223,6 +232,17 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun selectHomeTab(kind: OpenRecordKind) {
         setHomeTab(kind)
+    }
+
+    fun updateFolderDisplayMode(mode: BrowserDisplayMode) {
+        settingsStore.edit().putString(FolderDisplayModeKey, mode.preferenceValue).apply()
+        _uiState.update { it.copy(folderDisplayMode = mode) }
+    }
+
+    fun updateRemoteDisplayMode(mode: BrowserDisplayMode) {
+        settingsStore.edit().putString(RemoteDisplayModeKey, mode.preferenceValue).apply()
+        remoteVisibleRange = null
+        _uiState.update { it.copy(remoteDisplayMode = mode) }
     }
 
     fun showFolder() {
@@ -858,6 +878,13 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
             .coerceIn(MinNetworkCacheLimitMb, MaxNetworkCacheLimitMb)
     }
 
+    private fun loadBrowserDisplayMode(
+        key: String,
+        default: BrowserDisplayMode
+    ): BrowserDisplayMode {
+        return BrowserDisplayMode.fromPreference(settingsStore.getString(key, null), default)
+    }
+
     private fun networkCacheLimitBytes(): Long = _uiState.value.networkCacheLimitMb.toLong() * BytesPerMb
 
     private fun loadRecords(kind: OpenRecordKind): List<OpenRecord> {
@@ -1170,6 +1197,8 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
         const val RemoteThumbnailPrefetchCount = 8
         const val SavedPasswordMarker = "__saved_password__"
         const val NetworkCacheLimitMbKey = "network_cache_limit_mb"
+        const val FolderDisplayModeKey = "folder_display_mode"
+        const val RemoteDisplayModeKey = "remote_display_mode"
         const val DefaultNetworkCacheLimitMb = 512
         const val MinNetworkCacheLimitMb = 64
         const val MaxNetworkCacheLimitMb = 8192
