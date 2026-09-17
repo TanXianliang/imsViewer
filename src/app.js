@@ -10,6 +10,11 @@ import { getVersion } from '@tauri-apps/api/app';
 import { check } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { setupDedupTool } from './dedup.js';
+import {
+  BATCH_CONVERT_SETTINGS_VERSION,
+  loadBatchConvertSettings,
+  saveBatchConvertSettings,
+} from './batch-convert-settings.js';
 
 // ===== 更新检查 =====
 const SKIP_VERSION_KEY = 'imsviewer:skip-version';
@@ -1231,12 +1236,65 @@ function formatSize(bytes) {
 
 // ===== 批量转换模态框 =====
 let batchUnlisten = null;
+let batchStorageWarningShown = false;
+
+function getBatchConvertStorage() {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+function collectBatchConvertSettings() {
+  const folders = Array.from($$('#folder-list .folder-row')).map(row => {
+    const depth = Number.parseInt(row.querySelector('.depth-input').value, 10);
+    return {
+      path: row.querySelector('.path-input').value,
+      depth: Number.isFinite(depth) ? Math.min(100, Math.max(0, depth)) : 0,
+    };
+  });
+
+  return {
+    version: BATCH_CONVERT_SETTINGS_VERSION,
+    folders,
+    output_dir: $('#output-dir-input').value,
+    delete_source: $('#chk-delete-source').checked,
+    multi_threaded: $('#chk-multi-thread').checked,
+    preserve_structure: $('#chk-preserve-structure').checked,
+    merge_existing_ims: $('#chk-merge-existing-ims').checked,
+    sub_images_to_jpeg: $('#chk-sub-to-jpeg').checked,
+  };
+}
+
+function persistBatchConvertSettings() {
+  const saved = saveBatchConvertSettings(
+    getBatchConvertStorage(),
+    collectBatchConvertSettings(),
+  );
+  if (!saved && !batchStorageWarningShown) {
+    batchStorageWarningShown = true;
+    console.warn('批量转换配置保存失败，本次操作仍可继续');
+  }
+}
+
+function applyBatchConvertSettings(settings) {
+  const folderList = $('#folder-list');
+  folderList.innerHTML = '';
+  settings.folders.forEach(folder => addFolderRow(folder.path, folder.depth));
+
+  $('#output-dir-input').value = settings.output_dir;
+  $('#chk-delete-source').checked = settings.delete_source;
+  $('#chk-multi-thread').checked = settings.multi_threaded;
+  $('#chk-preserve-structure').checked = settings.preserve_structure;
+  $('#chk-merge-existing-ims').checked = settings.merge_existing_ims;
+  $('#chk-sub-to-jpeg').checked = settings.sub_images_to_jpeg;
+}
 
 function openBatchModal() {
   const modal = $('#batch-modal');
   modal.style.display = 'flex';
-  $('#folder-list').innerHTML = '';
-  addFolderRow();
+  applyBatchConvertSettings(loadBatchConvertSettings(getBatchConvertStorage()));
   $('#progress-fill').style.width = '0%';
   $('#progress-text').textContent = '准备就绪';
   $('#btn-start-convert').disabled = false;
@@ -1244,6 +1302,7 @@ function openBatchModal() {
 }
 
 function closeBatchModal() {
+  persistBatchConvertSettings();
   $('#batch-modal').style.display = 'none';
   if (batchUnlisten) {
     batchUnlisten();
@@ -1251,7 +1310,7 @@ function closeBatchModal() {
   }
 }
 
-function addFolderRow(path = '', depth = 0) {
+function addFolderRow(path = '', depth = 0, persist = false) {
   const row = document.createElement('div');
   row.className = 'folder-row';
   row.innerHTML = `
@@ -1263,36 +1322,40 @@ function addFolderRow(path = '', depth = 0) {
   row.querySelector('.btn-browse').addEventListener('click', async () => {
     try {
       const dir = await invoke('pick_folder');
-      if (dir) row.querySelector('.path-input').value = dir;
+      if (dir) {
+        row.querySelector('.path-input').value = dir;
+        persistBatchConvertSettings();
+      }
     } catch (e) { console.error('选择文件夹失败:', e); }
   });
   row.querySelector('.btn-remove').addEventListener('click', () => {
     row.remove();
     if ($('#folder-list').children.length === 0) addFolderRow();
+    persistBatchConvertSettings();
   });
   $('#folder-list').appendChild(row);
+  if (persist) persistBatchConvertSettings();
 }
 
 function collectBatchConfig() {
-  const folders = [];
-  $$('#folder-list .folder-row').forEach(row => {
-    const path = row.querySelector('.path-input').value.trim();
-    const depth = parseInt(row.querySelector('.depth-input').value) || 0;
-    if (path) folders.push({ path, depth: Math.min(100, Math.max(0, depth)) });
-  });
-  const outputDir = $('#output-dir-input').value.trim();
+  const settings = collectBatchConvertSettings();
+  const folders = settings.folders
+    .map(folder => ({ ...folder, path: folder.path.trim() }))
+    .filter(folder => folder.path);
+  const outputDir = settings.output_dir.trim();
   return {
     folders,
-    delete_source: $('#chk-delete-source').checked,
-    multi_threaded: $('#chk-multi-thread').checked,
+    delete_source: settings.delete_source,
+    multi_threaded: settings.multi_threaded,
     output_dir: outputDir || null,
-    preserve_structure: $('#chk-preserve-structure').checked,
-    merge_existing_ims: $('#chk-merge-existing-ims').checked,
-    sub_images_to_jpeg: $('#chk-sub-to-jpeg').checked,
+    preserve_structure: settings.preserve_structure,
+    merge_existing_ims: settings.merge_existing_ims,
+    sub_images_to_jpeg: settings.sub_images_to_jpeg,
   };
 }
 
 async function startBatchConvert() {
+  persistBatchConvertSettings();
   const config = collectBatchConfig();
   if (config.folders.length === 0) {
     alert('请至少添加一个文件夹');
@@ -1333,15 +1396,23 @@ async function startBatchConvert() {
 }
 
 function setupBatchEvents() {
-  $('#btn-add-folder').onclick = () => addFolderRow();
+  $('#btn-add-folder').onclick = () => addFolderRow('', 0, true);
   $('#btn-modal-close').onclick = () => closeBatchModal();
   $('#btn-cancel-convert').onclick = () => closeBatchModal();
   $('#btn-start-convert').onclick = () => startBatchConvert();
   $('#btn-browse-output').onclick = async () => {
     try {
       const dir = await invoke('pick_folder');
-      if (dir) $('#output-dir-input').value = dir;
+      if (dir) {
+        $('#output-dir-input').value = dir;
+        persistBatchConvertSettings();
+      }
     } catch (e) { console.error('选择文件夹失败:', e); }
+  };
+  $('#batch-modal').oninput = event => {
+    if (event.target.matches('#folder-list input, #output-dir-input, .modal-options input')) {
+      persistBatchConvertSettings();
+    }
   };
   // 默认添加一行空文件夹
   if ($('#folder-list').children.length === 0) addFolderRow();

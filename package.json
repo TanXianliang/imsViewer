@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "check:batch-settings-ui": "node scripts/check_batch_convert_settings_ui.mjs",
     "check:dedup-ui": "node scripts/check_dedup_batch_ui.mjs",
+    "test:batch-settings": "node --test tests/batch-convert-settings.test.mjs",
     "tauri": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_with_libclang.ps1 npm exec tauri --"
   },
   "devDependencies": {
