@@ -1,6 +1,6 @@
 [package]
 name = "imsviewer"
-version = "1.2.5"
+version = "1.2.6"
 description = "IMS Image Viewer"
 authors = ["imsViewer"]
 edition = "2021"
