@@ -10,6 +10,7 @@ import { getVersion } from '@tauri-apps/api/app';
 import { check } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { setupDedupTool } from './dedup.js';
+import { createCoverExportTool } from './cover-export.js';
 import {
   BATCH_CONVERT_SETTINGS_VERSION,
   loadBatchConvertSettings,
@@ -98,6 +99,8 @@ const dom = {
 };
 
 // ===== 初始化 =====
+const coverExportTool = createCoverExportTool({ invoke, listen });
+
 function init() {
   dom.ctx = dom.canvas.getContext('2d');
   setupCanvasSize();
@@ -1072,6 +1075,9 @@ function setupMenuActions() {
         case 'batch-extract':
           openExtractModal();
           break;
+        case 'batch-export-covers':
+          coverExportTool.open();
+          break;
         case 'fit':
           fitToWindow();
           drawImage();
@@ -1152,6 +1158,9 @@ function setupMenuActions() {
             '批量解压:\n' +
             '  工具 → 批量解压 IMS\n' +
             '  选择输入目录和输出目录，可保持目录结构\n\n' +
+            '批量导出封面:\n' +
+            '  工具 → 批量导出封面\n' +
+            '  选择源目录和输出目录，可保持目录结构\n\n' +
             '批量转换:\n' +
             '  工具 → 批量转换\n' +
             '  添加文件夹 → 设置深度 → 开始\n' +

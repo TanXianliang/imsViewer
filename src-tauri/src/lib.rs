@@ -7,6 +7,7 @@
 //!   extract_image()    — 导出单张图片
 //!   extract_all()      — 导出全部子图
 //!   start_batch_extract() — 目录级批量解压 IMS
+//!   start_batch_export_covers() — 目录级批量导出 IMS 封面
 
 use base64::Engine;
 use std::collections::{HashMap, HashSet};
@@ -17,6 +18,7 @@ use std::time::SystemTime;
 use tauri::Emitter;
 use tauri::Manager;
 
+mod cover_export;
 mod dedup;
 mod ims;
 mod ims_pack;
@@ -1998,6 +2000,7 @@ pub fn run(launch_file: Option<String>) {
             extract_image,
             extract_all,
             start_batch_extract,
+            cover_export::start_batch_export_covers,
             start_batch_convert,
             start_batch_upgrade,
             start_batch_resize,

@@ -583,6 +583,42 @@ body {
   min-height: 16px;
 }
 
+.cover-export-hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+#cover-export-progress-text {
+  overflow-wrap: anywhere;
+}
+
+#cover-export-modal .output-dir-row > label {
+  width: 48px;
+}
+
+#cover-export-modal .path-input {
+  min-width: 0;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  padding: 5px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+#cover-export-modal .path-input:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+#cover-export-modal input:disabled,
+#cover-export-modal .btn-browse:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 #btn-add-folder { align-self: flex-start; }
 
 .output-dir-row {
